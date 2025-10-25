@@ -167,6 +167,13 @@ impl<C: StoreHandle, E: KvEngine> SplitCheckObserver<E> for SizeCheckObserver<C>
         REGION_SIZE_HISTOGRAM.observe(region_size as f64);
 
         if need_split_region || need_bucket_checker {
+            info!(
+                "NEED SPLITTING TO MAKE SURE REGION IS WITHIN SIZE LIMIT ==================";
+                "region_id" => region.get_id(),
+                "size" => region_size,
+                "threshold" => host.cfg.region_max_size().0,
+                "policy" => ?policy,
+            );
             // when it's a large region use approximate way to produce split keys
             if need_split_region {
                 if region_size >= host.cfg.region_size_threshold_for_approximate.0 {

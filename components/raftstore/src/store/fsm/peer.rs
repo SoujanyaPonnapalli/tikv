@@ -6360,6 +6360,7 @@ where
             CheckPolicy::Scan,
             self.gen_bucket_range_for_update(),
         );
+        println!("CHECKING SPLIT REGION ===============================");
         if let Err(e) = self.ctx.split_check_scheduler.schedule(task) {
             error!(
                 "failed to schedule split check";

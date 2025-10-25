@@ -656,6 +656,7 @@ impl RaftEngine for RaftLogEngine {
     fn consume(&self, batch: &mut Self::LogBatch, sync: bool) -> Result<usize> {
         // Always use ForegroundWrite as all `consume` calls share the same write queue.
         let _guard = WithIoType::new(IoType::ForegroundWrite);
+        println!(" *************** Write to Raft Engine 1 # **************");
         self.0.write(&mut batch.0, sync).map_err(transfer_error)
     }
 
@@ -668,7 +669,9 @@ impl RaftEngine for RaftLogEngine {
     ) -> Result<usize> {
         // Always use ForegroundWrite as all `consume` calls share the same write queue.
         let _guard = WithIoType::new(IoType::ForegroundWrite);
-        self.0.write(&mut batch.0, sync).map_err(transfer_error)
+        println!(" *************** Write to Raft Engine 1 ## **************");
+        let data_size = self.0.write(&mut batch.0, sync).map_err(transfer_error)?;
+        Ok(data_size)
     }
 
     fn clean(
