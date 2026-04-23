@@ -30,7 +30,33 @@
 
 use std::fmt;
 
+use lazy_static::lazy_static;
+use prometheus::{register_int_counter, IntCounter};
 use raft::eraftpb::{Entry, EntryType};
+
+lazy_static! {
+    /// Fires when this node's on-disk HardState.commit was clamped
+    /// down to last_index at startup. Under metronome, this can
+    /// legitimately happen after a crash because the sparse WAL may
+    /// have lost entries that we memory-ACKed before the crash. An
+    /// elevated rate of these relative to restarts suggests something
+    /// else is wrong.
+    pub static ref METRONOME_COMMIT_CLAMPS_ON_LOAD: IntCounter = register_int_counter!(
+        "tikv_raftstore_metronome_commit_clamps_on_load_total",
+        "Number of times a Peer clamped HardState.commit down to local last_index at startup under metronome mode."
+    )
+    .unwrap();
+
+    /// Fires when an incoming MsgHeartbeat / MsgAppend carried a
+    /// Commit value greater than our local last_index and we
+    /// clamped it. A pre-existing counter would have no way to
+    /// surface raft-rs panic pressure; this one does.
+    pub static ref METRONOME_INCOMING_COMMIT_CLAMPS: IntCounter = register_int_counter!(
+        "tikv_raftstore_metronome_incoming_commit_clamps_total",
+        "Number of times an incoming heartbeat/append Commit was clamped to local last_index under metronome mode."
+    )
+    .unwrap();
+}
 
 /// Errors that can be returned when constructing a [`Scheme`].
 #[derive(Debug, PartialEq, Eq)]
