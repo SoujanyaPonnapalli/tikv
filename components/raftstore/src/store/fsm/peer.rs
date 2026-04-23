@@ -4286,6 +4286,36 @@ where
 
         self.update_region(cp.region);
 
+        // Metronome (Phase 3): the region's voter list just changed,
+        // so the persist-set scheme must be rebuilt. Learners are
+        // excluded — metronome's K ≥ f+1 safety invariant is defined
+        // over voters only (see DESIGN in metronome/mod.rs). The
+        // Arc<Scheme> pointer on PeerStorage is replaced atomically,
+        // so the Ready hot path sees either the old scheme or the
+        // new one but never a torn read.
+        if self.ctx.cfg.metronome {
+            use kvproto::metapb::PeerRole;
+            let voters: Vec<u64> = self
+                .fsm
+                .peer
+                .region()
+                .get_peers()
+                .iter()
+                .filter(|p| p.get_role() != PeerRole::Learner)
+                .map(|p| p.get_id())
+                .collect();
+            let k = self.ctx.cfg.metronome_quorum_size;
+            if let Err(e) = self.fsm.peer.mut_store().init_metronome(voters, k) {
+                warn!(
+                    "metronome: failed to rebuild scheme after ConfChange; keeping previous";
+                    "region_id" => self.region_id(),
+                    "error" => ?e,
+                );
+            } else {
+                crate::store::metronome::METRONOME_SCHEME_REBUILDS.inc();
+            }
+        }
+
         fail_point!("change_peer_after_update_region");
         fail_point!(
             "change_peer_after_update_region_store_3",

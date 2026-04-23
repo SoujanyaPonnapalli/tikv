@@ -1077,12 +1077,16 @@ where
             // disabled-mode all fall through unchanged. ConfChange
             // entries are always kept.
             if self.metronome_enabled {
-                crate::store::metronome::filter_entries(
+                let skipped = crate::store::metronome::filter_entries(
                     &mut entries,
                     self.metronome_scheme.as_deref(),
                     self.peer_id,
                     self.metronome_is_leader,
                 );
+                if skipped > 0 {
+                    crate::store::metronome::METRONOME_ENTRIES_SKIPPED
+                        .inc_by(skipped as u64);
+                }
             }
             self.append(entries, &mut write_task);
         }

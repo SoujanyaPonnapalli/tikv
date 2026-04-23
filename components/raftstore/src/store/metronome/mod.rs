@@ -56,6 +56,24 @@ lazy_static! {
         "Number of times an incoming heartbeat/append Commit was clamped to local last_index under metronome mode."
     )
     .unwrap();
+
+    /// Fires whenever a ConfChange applies and we rebuild the
+    /// persist-set scheme from the new voter list. One increment per
+    /// region per ConfChange commit.
+    pub static ref METRONOME_SCHEME_REBUILDS: IntCounter = register_int_counter!(
+        "tikv_raftstore_metronome_scheme_rebuilds_total",
+        "Number of times the metronome scheme was rebuilt after a ConfChange commit."
+    )
+    .unwrap();
+
+    /// Increments by the number of entries this node did NOT fsync
+    /// on each Ready because they fell outside its persist-set. This
+    /// is the primary signal that metronome is doing useful work.
+    pub static ref METRONOME_ENTRIES_SKIPPED: IntCounter = register_int_counter!(
+        "tikv_raftstore_metronome_entries_skipped_total",
+        "Cumulative count of raft log entries filtered out of the WAL write batch on followers under metronome mode."
+    )
+    .unwrap();
 }
 
 /// Errors that can be returned when constructing a [`Scheme`].
