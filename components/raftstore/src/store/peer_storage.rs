@@ -241,6 +241,21 @@ where
 
     entry_storage: EntryStorage<EK, ER>,
 
+    // ---- Metronome ----
+    // Active persist-set scheme for this region (None means the scheme
+    // has not been initialized yet or metronome is disabled). Built
+    // from the region's current voter list; rebuilt on ConfChange in
+    // Phase 3.
+    metronome_scheme: Option<std::sync::Arc<crate::store::metronome::Scheme>>,
+    // Cached is_leader flag updated once per Ready by the Peer layer
+    // before handle_raft_ready is called. Leaders persist everything
+    // so we skip the filter path entirely in that case.
+    metronome_is_leader: bool,
+    // Whether metronome mode is on for this cluster (copied from
+    // cfg.metronome at Peer init; doesn't change at runtime because
+    // the config field is #[online_config(skip)]).
+    metronome_enabled: bool,
+
     pub tag: String,
 }
 
@@ -355,7 +370,56 @@ where
             snap_tried_cnt: RefCell::new(0),
             tag,
             entry_storage,
+            // Metronome: off by default. Peer::new calls
+            // init_metronome(..) after construction to set the
+            // scheme from the region's voter list when cfg.metronome
+            // is enabled.
+            metronome_scheme: None,
+            metronome_is_leader: false,
+            metronome_enabled: false,
         })
+    }
+
+    /// Enable metronome for this peer and build the initial persist-set
+    /// scheme from the region's voter list. Called once from
+    /// `Peer::new` when `cfg.metronome` is true. See
+    /// `crate::store::metronome` for the scheme semantics. Idempotent:
+    /// safe to call with the same inputs; returns Err only if the
+    /// voter set violates K ≥ f+1 (which shouldn't be possible for a
+    /// valid region but we surface it).
+    pub fn init_metronome(
+        &mut self,
+        voters: Vec<u64>,
+        quorum_size: usize,
+    ) -> std::result::Result<(), crate::store::metronome::SchemeError> {
+        self.metronome_enabled = true;
+        if voters.len() < 2 {
+            // Single-node regions don't benefit from metronome; the
+            // rotating persist-set collapses to "always persist".
+            self.metronome_scheme = None;
+            return Ok(());
+        }
+        let scheme = crate::store::metronome::Scheme::new(voters, quorum_size)?;
+        self.metronome_scheme = Some(std::sync::Arc::new(scheme));
+        Ok(())
+    }
+
+    /// Called by the Peer layer once per Ready iteration, before
+    /// `handle_raft_ready`, to record whether we're currently the
+    /// leader. Leaders always persist every entry.
+    #[inline]
+    pub fn set_metronome_is_leader(&mut self, is_leader: bool) {
+        self.metronome_is_leader = is_leader;
+    }
+
+    /// Exposed for tests: the number of voters in the active scheme,
+    /// or 0 if the scheme isn't built.
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn metronome_num_voters(&self) -> usize {
+        self.metronome_scheme
+            .as_ref()
+            .map(|s| s.num_nodes())
+            .unwrap_or(0)
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -1007,7 +1071,20 @@ where
         };
 
         if !ready.entries().is_empty() {
-            self.append(ready.take_entries(), &mut write_task);
+            let mut entries = ready.take_entries();
+            // Metronome: drop entries outside this follower's
+            // persist-set. Leaders, uninitialized schemes, and
+            // disabled-mode all fall through unchanged. ConfChange
+            // entries are always kept.
+            if self.metronome_enabled {
+                crate::store::metronome::filter_entries(
+                    &mut entries,
+                    self.metronome_scheme.as_deref(),
+                    self.peer_id,
+                    self.metronome_is_leader,
+                );
+            }
+            self.append(entries, &mut write_task);
         }
 
         // Last index is 0 means the peer is created from raft message

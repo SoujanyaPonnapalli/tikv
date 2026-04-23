@@ -1102,6 +1102,31 @@ where
         let persisted_index = peer.raft_group.raft.raft_log.persisted;
         peer.mut_store().update_cache_persisted(persisted_index);
 
+        // Metronome: build the initial persist-set scheme from the
+        // region's voting members (learners are excluded — they do
+        // not participate in the K ≥ f+1 durability guarantee).
+        // Phase 3 rebuilds the scheme on every ConfChange apply.
+        if cfg.metronome {
+            use kvproto::metapb::PeerRole;
+            let voters: Vec<u64> = region
+                .get_peers()
+                .iter()
+                .filter(|p| p.get_role() != PeerRole::Learner)
+                .map(|p| p.get_id())
+                .collect();
+            if let Err(e) = peer
+                .mut_store()
+                .init_metronome(voters, cfg.metronome_quorum_size)
+            {
+                warn!(
+                    "metronome: failed to initialize scheme, falling back to baseline";
+                    "region_id" => region.get_id(),
+                    "peer_id" => peer_id,
+                    "error" => ?e,
+                );
+            }
+        }
+
         Ok(peer)
     }
 
@@ -2953,6 +2978,12 @@ where
                 }
             }
         }
+        // Metronome: snapshot the leader state into PeerStorage so
+        // the filter in handle_raft_ready knows whether to skip
+        // followers' entries. Leaders always persist everything.
+        let is_leader = self.is_leader();
+        self.mut_store().set_metronome_is_leader(is_leader);
+
         let (res, mut task) = match self
             .mut_store()
             .handle_raft_ready(&mut ready, destroy_regions)

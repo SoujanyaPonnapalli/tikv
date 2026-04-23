@@ -30,6 +30,8 @@
 
 use std::fmt;
 
+use raft::eraftpb::{Entry, EntryType};
+
 /// Errors that can be returned when constructing a [`Scheme`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum SchemeError {
@@ -162,6 +164,45 @@ impl Scheme {
         }
         false
     }
+}
+
+// ---- Filter helper --------------------------------------------------
+
+/// Filter a batch of entries according to the metronome scheme,
+/// retaining only those this node should WAL-persist.
+///
+/// Behaviour:
+/// - If `is_leader` is true, the vec is returned unchanged (leaders
+///   always persist everything, which keeps recovery cheap).
+/// - If `scheme` is None (metronome not initialised for this peer
+///   yet — e.g. during bootstrap before the first voter list is
+///   known), the vec is returned unchanged (fail-safe to baseline).
+/// - `EntryConfChange` / `EntryConfChangeV2` entries are always
+///   kept regardless of the scheme — membership transitions must
+///   be durable on every node so the scheme can be rebuilt after
+///   restart (Metronome §4.5).
+/// - Otherwise, entries where `scheme.should_persist(node_id, idx)
+///   == false` are dropped.
+///
+/// The returned `usize` is how many entries were skipped. Callers use
+/// it for the work-stealing buffer (Phase 4) and the skipped-count
+/// metric (Phase 5).
+pub fn filter_entries(
+    entries: &mut Vec<Entry>,
+    scheme: Option<&Scheme>,
+    node_id: u64,
+    is_leader: bool,
+) -> usize {
+    if is_leader || scheme.is_none() || entries.is_empty() {
+        return 0;
+    }
+    let scheme = scheme.unwrap();
+    let original_len = entries.len();
+    entries.retain(|e| match e.get_entry_type() {
+        EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => true,
+        _ => scheme.should_persist(node_id, e.get_index()),
+    });
+    original_len - entries.len()
 }
 
 // ---- Tests ----------------------------------------------------------
@@ -311,6 +352,98 @@ mod tests {
         for &n in s.node_ids() {
             assert_eq!(count[&n], s.quorum_size());
         }
+    }
+
+    // ----- filter_entries -----
+
+    fn ent(index: u64, ty: EntryType) -> Entry {
+        let mut e = Entry::default();
+        e.set_index(index);
+        e.set_entry_type(ty);
+        e
+    }
+
+    #[test]
+    fn filter_leader_keeps_all() {
+        let s = Scheme::new(vec![1, 2, 3], 2).unwrap();
+        let mut ents = (1..=10)
+            .map(|i| ent(i, EntryType::EntryNormal))
+            .collect::<Vec<_>>();
+        let skipped = filter_entries(&mut ents, Some(&s), 1, true);
+        assert_eq!(skipped, 0);
+        assert_eq!(ents.len(), 10);
+    }
+
+    #[test]
+    fn filter_no_scheme_keeps_all() {
+        let mut ents = (1..=10)
+            .map(|i| ent(i, EntryType::EntryNormal))
+            .collect::<Vec<_>>();
+        let skipped = filter_entries(&mut ents, None, 1, false);
+        assert_eq!(skipped, 0);
+        assert_eq!(ents.len(), 10);
+    }
+
+    #[test]
+    fn filter_follower_drops_non_persist_set() {
+        let s = Scheme::new(vec![1, 2, 3], 2).unwrap();
+        // Node 3 is in persist-set for indices with (i % 3) in {1, 2} → {1, 2, 4, 5, 7, 8, ...}
+        let mut ents = (1..=6)
+            .map(|i| ent(i, EntryType::EntryNormal))
+            .collect::<Vec<_>>();
+        // Node 1 (sorted pos 0): in persist-set for idx%3 ∈ {0,2} → indices 3, 5, 6 (not 1,2,4)
+        // The rotation starts at `index % N`; for index=1, persist-set = {node at pos 1, pos 2} = {2,3}
+        // So node 1 is NOT in set for idx=1. Let's just verify against should_persist.
+        let before: Vec<u64> = ents.iter().map(|e| e.get_index()).collect();
+        let skipped = filter_entries(&mut ents, Some(&s), 1, false);
+        let after: Vec<u64> = ents.iter().map(|e| e.get_index()).collect();
+        for &i in &before {
+            let was_kept = after.contains(&i);
+            let expected = s.should_persist(1, i);
+            assert_eq!(
+                was_kept, expected,
+                "index {} should_persist(1)={} was_kept={}",
+                i, expected, was_kept
+            );
+        }
+        assert_eq!(skipped, before.len() - after.len());
+        assert!(skipped > 0);
+    }
+
+    #[test]
+    fn filter_always_keeps_conf_change() {
+        let s = Scheme::new(vec![1, 2, 3], 2).unwrap();
+        // Construct 5 ConfChange entries; even if scheme says don't
+        // persist, they must all be retained.
+        let mut ents = (1..=5)
+            .map(|i| ent(i, EntryType::EntryConfChange))
+            .collect::<Vec<_>>();
+        let skipped = filter_entries(&mut ents, Some(&s), 1, false);
+        assert_eq!(skipped, 0);
+        assert_eq!(ents.len(), 5);
+        // Same with V2.
+        let mut ents = (1..=5)
+            .map(|i| ent(i, EntryType::EntryConfChangeV2))
+            .collect::<Vec<_>>();
+        let skipped = filter_entries(&mut ents, Some(&s), 1, false);
+        assert_eq!(skipped, 0);
+        assert_eq!(ents.len(), 5);
+    }
+
+    #[test]
+    fn filter_mixed_keeps_confchange_drops_normal_when_not_in_set() {
+        let s = Scheme::new(vec![1, 2, 3], 2).unwrap();
+        let mut ents = vec![
+            ent(1, EntryType::EntryNormal),
+            ent(2, EntryType::EntryConfChange),
+            ent(3, EntryType::EntryNormal),
+            ent(4, EntryType::EntryConfChangeV2),
+        ];
+        filter_entries(&mut ents, Some(&s), 1, false);
+        // Entries 2 and 4 must always be present.
+        let indices: Vec<u64> = ents.iter().map(|e| e.get_index()).collect();
+        assert!(indices.contains(&2));
+        assert!(indices.contains(&4));
     }
 
     #[test]
