@@ -255,6 +255,11 @@ where
     // cfg.metronome at Peer init; doesn't change at runtime because
     // the config field is #[online_config(skip)]).
     metronome_enabled: bool,
+    // Per-peer work-stealing state machine (paper §4.2). Drives the
+    // stall detection + "log everything" window that unblocks commits
+    // when a persist-set straggler is slow. Constructed lazily in
+    // init_metronome when voters.len() >= 2.
+    metronome_ws: Option<crate::store::metronome::WorkSteal>,
 
     pub tag: String,
 }
@@ -377,6 +382,7 @@ where
             metronome_scheme: None,
             metronome_is_leader: false,
             metronome_enabled: false,
+            metronome_ws: None,
         })
     }
 
@@ -397,11 +403,25 @@ where
             // Single-node regions don't benefit from metronome; the
             // rotating persist-set collapses to "always persist".
             self.metronome_scheme = None;
+            // Keep any existing WorkSteal state so a scheme rebuild
+            // back up to N >= 2 doesn't reset the stall clock
+            // spuriously.
             return Ok(());
         }
         let scheme = crate::store::metronome::Scheme::new(voters, quorum_size)?;
         self.metronome_scheme = Some(std::sync::Arc::new(scheme));
         Ok(())
+    }
+
+    /// Initialize (or re-initialize) the work-stealing state machine
+    /// with the configured timeout and duration. Called by Peer::new
+    /// once, right after `init_metronome`, when cfg.metronome is on.
+    pub fn init_metronome_work_steal(
+        &mut self,
+        timeout: std::time::Duration,
+        duration: std::time::Duration,
+    ) {
+        self.metronome_ws = Some(crate::store::metronome::WorkSteal::new(timeout, duration));
     }
 
     /// Called by the Peer layer once per Ready iteration, before
@@ -1072,20 +1092,56 @@ where
 
         if !ready.entries().is_empty() {
             let mut entries = ready.take_entries();
-            // Metronome: drop entries outside this follower's
-            // persist-set. Leaders, uninitialized schemes, and
-            // disabled-mode all fall through unchanged. ConfChange
-            // entries are always kept.
+            let now = std::time::Instant::now();
+            // Metronome filter + work-stealing bookkeeping. Leaders
+            // always persist everything. When WS is active the filter
+            // becomes a passthrough so the straggler-stalled commit
+            // pipeline unsticks (paper §4.2).
             if self.metronome_enabled {
-                let skipped = crate::store::metronome::filter_entries(
-                    &mut entries,
-                    self.metronome_scheme.as_deref(),
-                    self.peer_id,
-                    self.metronome_is_leader,
-                );
-                if skipped > 0 {
+                let ws_active = self
+                    .metronome_ws
+                    .as_ref()
+                    .map_or(false, |w| w.is_active(now));
+                let bypass_filter = self.metronome_is_leader || ws_active;
+
+                let pre_indices: Vec<u64> =
+                    entries.iter().map(|e| e.get_index()).collect();
+                let pre_len = entries.len();
+
+                if !bypass_filter {
+                    let _ = crate::store::metronome::filter_entries(
+                        &mut entries,
+                        self.metronome_scheme.as_deref(),
+                        self.peer_id,
+                        false, // is_leader handled above
+                    );
+                }
+
+                let post_len = entries.len();
+                let skipped_count = pre_len - post_len;
+                if skipped_count > 0 {
                     crate::store::metronome::METRONOME_ENTRIES_SKIPPED
-                        .inc_by(skipped as u64);
+                        .inc_by(skipped_count as u64);
+                }
+
+                // Feed the WS state machine: commit + skipped idx set.
+                // Read hs_commit up front to avoid overlapping borrows
+                // of self below.
+                let hs_commit = ready
+                    .hs()
+                    .map(|hs| hs.get_commit())
+                    .unwrap_or_else(|| self.raft_state().get_hard_state().get_commit());
+                if let Some(ws) = self.metronome_ws.as_mut() {
+                    let kept: std::collections::HashSet<u64> =
+                        entries.iter().map(|e| e.get_index()).collect();
+                    let skipped_idxs: Vec<u64> = pre_indices
+                        .into_iter()
+                        .filter(|i| !kept.contains(i))
+                        .collect();
+                    ws.record(hs_commit, skipped_idxs, now);
+                    if ws.maybe_trigger(now) {
+                        crate::store::metronome::METRONOME_WORK_STEALS_TRIGGERED.inc();
+                    }
                 }
             }
             self.append(entries, &mut write_task);

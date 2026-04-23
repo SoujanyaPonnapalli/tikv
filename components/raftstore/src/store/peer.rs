@@ -1154,6 +1154,12 @@ where
                     "error" => ?e,
                 );
             }
+            // Arm the work-stealing state machine with config-supplied
+            // timeout / duration. Defaults are 1s / 1m (config.rs).
+            peer.mut_store().init_metronome_work_steal(
+                cfg.metronome_work_steal_timeout.0,
+                cfg.metronome_work_steal_duration.0,
+            );
         }
 
         Ok(peer)

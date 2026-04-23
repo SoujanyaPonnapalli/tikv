@@ -28,7 +28,10 @@
 //! persist-set is built from the *voting* members of the region only;
 //! learners never participate in Metronome's durability guarantees.
 
-use std::fmt;
+use std::{
+    fmt,
+    time::{Duration, Instant},
+};
 
 use lazy_static::lazy_static;
 use prometheus::{register_int_counter, IntCounter};
@@ -72,6 +75,15 @@ lazy_static! {
     pub static ref METRONOME_ENTRIES_SKIPPED: IntCounter = register_int_counter!(
         "tikv_raftstore_metronome_entries_skipped_total",
         "Cumulative count of raft log entries filtered out of the WAL write batch on followers under metronome mode."
+    )
+    .unwrap();
+
+    /// Fires each time a stalled peer enters the "log everything"
+    /// window via work-stealing (paper §4.2). An elevated rate
+    /// correlates with a persist-set straggler in the cluster.
+    pub static ref METRONOME_WORK_STEALS_TRIGGERED: IntCounter = register_int_counter!(
+        "tikv_raftstore_metronome_work_steals_triggered_total",
+        "Number of times a metronome follower triggered a work-steal due to a commit-index stall while holding buffered skipped entries."
     )
     .unwrap();
 }
@@ -207,6 +219,155 @@ impl Scheme {
             }
         }
         false
+    }
+}
+
+// ---- Work stealing (paper §4.2) -------------------------------------
+
+/// Per-peer work-stealing state. Instantiated once per region when
+/// metronome is enabled and driven from the Ready loop. Pure
+/// computation + time; no I/O, no locks — callers serialise access
+/// naturally because all Peer state runs on a single FSM thread.
+///
+/// The algorithm: track the indices this follower dropped via the
+/// filter; arm a stall timer the moment the buffer transitions from
+/// empty → non-empty; reset the timer whenever the cluster's
+/// committed index advances. If the timer's elapsed time exceeds
+/// `timeout` while the buffer is still non-empty AND we've observed
+/// at least one real commit (i.e. the cluster is past cold-start),
+/// enter a "log everything" window for `duration`. In the window the
+/// filter becomes a passthrough so subsequent entries are fsynced,
+/// unsticking the leader's commit pipeline that had been waiting on
+/// a straggler persister.
+///
+/// Regression guards baked into the code (each corresponds to a
+/// real bug we hit in the etcd port):
+///   - B3(a): default `timeout` is set by the caller (1s) — far
+///     above typical p99 commit jitter.
+///   - B3(b): `last_advance` is stamped only on the 0 → non-empty
+///     transition of the skipped buffer, not on every Ready.
+///   - B3(c): `maybe_trigger` refuses to fire until `last_commit > 0`,
+///     i.e. at least one real commit has been observed.
+#[derive(Debug)]
+pub struct WorkSteal {
+    /// Skipped indices, kept ascending. Drained by commit advance.
+    skipped: Vec<u64>,
+    /// Highest HardState.commit we've ever observed on this peer.
+    /// Zero until the cluster's first commit propagates here.
+    last_commit: u64,
+    /// Wall-time stamp of the latest "stall clock reset" event:
+    /// either a commit-index advance or the buffer arming on 0→N.
+    /// None until armed the first time.
+    last_advance: Option<Instant>,
+    /// Non-None means we're in the "log everything" window; the
+    /// instant is when the window expires.
+    active_until: Option<Instant>,
+    /// Stall threshold.
+    timeout: Duration,
+    /// "Log everything" window length.
+    duration: Duration,
+}
+
+impl WorkSteal {
+    pub fn new(timeout: Duration, duration: Duration) -> Self {
+        WorkSteal {
+            skipped: Vec::new(),
+            last_commit: 0,
+            last_advance: None,
+            active_until: None,
+            timeout,
+            duration,
+        }
+    }
+
+    /// Returns true if we're currently in the "log everything"
+    /// window. The caller uses this to make the filter a passthrough.
+    pub fn is_active(&self, now: Instant) -> bool {
+        self.active_until.map_or(false, |t| now < t)
+    }
+
+    /// Called from the Ready loop after filtering, with:
+    ///   - `hs_commit`: the HardState.commit in this Ready
+    ///     (or the last known one if the Ready carried no new HS).
+    ///   - `newly_skipped`: indices we chose not to fsync this round.
+    pub fn record(&mut self, hs_commit: u64, newly_skipped: impl IntoIterator<Item = u64>, now: Instant) {
+        // Advance commit + drain.
+        if hs_commit > self.last_commit {
+            self.last_commit = hs_commit;
+            self.last_advance = Some(now);
+            if !self.skipped.is_empty() {
+                let drop_upto = hs_commit;
+                let mut i = 0;
+                while i < self.skipped.len() && self.skipped[i] <= drop_upto {
+                    i += 1;
+                }
+                self.skipped.drain(..i);
+            }
+        }
+
+        // If we're already in the active window, don't re-buffer —
+        // everything is being persisted this Ready anyway.
+        if self.is_active(now) {
+            return;
+        }
+
+        // Append new skipped indices. Arm the timer on 0→N transition.
+        let was_empty = self.skipped.is_empty();
+        for idx in newly_skipped {
+            if idx > self.last_commit {
+                self.skipped.push(idx);
+            }
+        }
+        if was_empty && !self.skipped.is_empty() {
+            self.last_advance = Some(now);
+        }
+    }
+
+    /// Decide whether to fire the work-steal. Returns true on the
+    /// transition-to-active edge; the caller should bump metrics and
+    /// proceed. Subsequent calls within the window return false.
+    pub fn maybe_trigger(&mut self, now: Instant) -> bool {
+        // Already active? Check if the window has elapsed.
+        if let Some(until) = self.active_until {
+            if now < until {
+                return false;
+            }
+            // Window elapsed; clear so the next stall can re-arm.
+            self.active_until = None;
+            return false;
+        }
+        // Buffer empty → nothing at risk.
+        if self.skipped.is_empty() {
+            return false;
+        }
+        // Startup guard: don't fire before the cluster's first commit
+        // has reached this peer (B3(c) regression).
+        if self.last_commit == 0 {
+            return false;
+        }
+        // Stall clock.
+        match self.last_advance {
+            Some(t) if now.saturating_duration_since(t) >= self.timeout => {
+                self.active_until = Some(now + self.duration);
+                // Buffer now absorbed by the window; subsequent entries
+                // are persisted fully during the window so drop stale
+                // tracking state.
+                self.skipped.clear();
+                self.last_advance = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // ---- Exposed for tests/observability ----
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn skipped_len(&self) -> usize {
+        self.skipped.len()
+    }
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn last_commit(&self) -> u64 {
+        self.last_commit
     }
 }
 
@@ -488,6 +649,145 @@ mod tests {
         let indices: Vec<u64> = ents.iter().map(|e| e.get_index()).collect();
         assert!(indices.contains(&2));
         assert!(indices.contains(&4));
+    }
+
+    // ----- WorkSteal state machine -----
+
+    fn ws(timeout_ms: u64, duration_ms: u64) -> WorkSteal {
+        WorkSteal::new(
+            Duration::from_millis(timeout_ms),
+            Duration::from_millis(duration_ms),
+        )
+    }
+
+    #[test]
+    fn ws_baseline_init() {
+        let mut w = ws(1000, 60_000);
+        let t0 = Instant::now();
+        // First Ready: commit=0, skipped=[2,3]. Buffer was empty →
+        // last_advance must be armed.
+        w.record(0, [2u64, 3], t0);
+        assert_eq!(w.skipped_len(), 2);
+        assert!(w.last_advance.is_some(), "timer must arm on 0→N");
+    }
+
+    #[test]
+    fn ws_no_arm_without_skipped_entries() {
+        // B3(b) regression guard: a Ready with no skipped entries
+        // must NOT arm the timer.
+        let mut w = ws(1000, 60_000);
+        let t0 = Instant::now();
+        w.record(0, std::iter::empty(), t0);
+        assert!(w.last_advance.is_none(), "no arm with empty skip list");
+        // Next Ready adds skipped indices → arm AT THAT MOMENT.
+        let t1 = t0 + Duration::from_millis(50);
+        w.record(0, [5u64], t1);
+        assert!(w.last_advance.is_some());
+        assert!(w.last_advance.unwrap() >= t1);
+    }
+
+    #[test]
+    fn ws_commit_advance_drains_buffer() {
+        let mut w = ws(1000, 60_000);
+        let t0 = Instant::now();
+        w.record(0, [2u64, 3, 4, 5], t0);
+        assert_eq!(w.skipped_len(), 4);
+        // Commit advances past 3 → indices 2 and 3 drain.
+        let t1 = t0 + Duration::from_millis(10);
+        w.record(3, std::iter::empty(), t1);
+        assert_eq!(w.skipped_len(), 2);
+    }
+
+    #[test]
+    fn ws_no_fire_before_first_commit() {
+        // B3(c) regression guard: before the first commit ever
+        // reaches us, even a stale timer must not fire. Otherwise
+        // cluster cold-start spuriously puts us in log-everything
+        // mode and wipes the byte savings for a full `duration`.
+        let mut w = ws(1, 60_000);
+        let t0 = Instant::now();
+        w.record(0, [5u64], t0);
+        // Advance time past the timeout; commit is still 0.
+        let t1 = t0 + Duration::from_millis(500);
+        let triggered = w.maybe_trigger(t1);
+        assert!(!triggered, "must not fire when last_commit == 0");
+        assert!(!w.is_active(t1));
+    }
+
+    #[test]
+    fn ws_fires_on_stall() {
+        let mut w = ws(10, 1_000);
+        let t0 = Instant::now();
+        // Armed + commit observed + buffered.
+        w.record(1, [5u64, 7], t0);
+        assert_eq!(w.last_commit(), 1);
+        // Advance time past timeout without another commit.
+        let t1 = t0 + Duration::from_millis(50);
+        let fired = w.maybe_trigger(t1);
+        assert!(fired);
+        assert!(w.is_active(t1));
+    }
+
+    #[test]
+    fn ws_no_fire_when_empty() {
+        let mut w = ws(1, 1_000);
+        let t0 = Instant::now();
+        // commit advanced; never buffered anything.
+        w.record(10, std::iter::empty(), t0);
+        let t1 = t0 + Duration::from_millis(100);
+        assert!(!w.maybe_trigger(t1));
+    }
+
+    #[test]
+    fn ws_no_fire_within_timeout() {
+        let mut w = ws(1_000, 60_000);
+        let t0 = Instant::now();
+        w.record(1, [3u64], t0);
+        let t1 = t0 + Duration::from_millis(10);
+        assert!(!w.maybe_trigger(t1), "still under timeout");
+    }
+
+    #[test]
+    fn ws_exits_after_duration() {
+        let mut w = ws(1, 20);
+        let t0 = Instant::now();
+        w.record(1, [3u64], t0);
+        let t1 = t0 + Duration::from_millis(10);
+        assert!(w.maybe_trigger(t1), "first trigger");
+        assert!(w.is_active(t1));
+        let t2 = t0 + Duration::from_millis(100);
+        assert!(!w.is_active(t2));
+        // After the window, a subsequent trigger check clears state.
+        w.maybe_trigger(t2);
+        assert!(w.active_until.is_none());
+    }
+
+    #[test]
+    fn ws_active_suppresses_buffering() {
+        let mut w = ws(1, 1_000);
+        let t0 = Instant::now();
+        w.record(1, [3u64], t0);
+        let t1 = t0 + Duration::from_millis(10);
+        assert!(w.maybe_trigger(t1));
+        assert_eq!(w.skipped_len(), 0, "trigger should clear buffer");
+        // New skipped entries during the window should NOT accumulate.
+        let t2 = t0 + Duration::from_millis(50);
+        w.record(1, [9u64], t2);
+        assert_eq!(w.skipped_len(), 0, "no buffering while active");
+    }
+
+    #[test]
+    fn ws_buffer_drained_in_commit_order() {
+        let mut w = ws(1_000, 60_000);
+        let t0 = Instant::now();
+        w.record(0, [2u64, 3, 4], t0);
+        w.record(0, [5u64, 6, 7], t0 + Duration::from_millis(1));
+        w.record(0, [8u64, 9, 10], t0 + Duration::from_millis(2));
+        assert_eq!(w.skipped_len(), 9);
+        w.record(6, std::iter::empty(), t0 + Duration::from_millis(10));
+        assert_eq!(w.skipped_len(), 4, "indices ≤ 6 drained");
+        w.record(10, std::iter::empty(), t0 + Duration::from_millis(20));
+        assert_eq!(w.skipped_len(), 0);
     }
 
     #[test]
