@@ -1093,10 +1093,6 @@ where
         if !ready.entries().is_empty() {
             let mut entries = ready.take_entries();
             let now = std::time::Instant::now();
-            // Metronome filter + work-stealing bookkeeping. Leaders
-            // always persist everything. When WS is active the filter
-            // becomes a passthrough so the straggler-stalled commit
-            // pipeline unsticks (paper §4.2).
             if self.metronome_enabled {
                 let ws_active = self
                     .metronome_ws
@@ -1104,40 +1100,51 @@ where
                     .map_or(false, |w| w.is_active(now));
                 let bypass_filter = self.metronome_is_leader || ws_active;
 
-                let pre_indices: Vec<u64> =
-                    entries.iter().map(|e| e.get_index()).collect();
-                let pre_len = entries.len();
-
+                // Stub-out (don't drop) entries this node is not in
+                // the persist-set for. The on-disk log stays
+                // contiguous — raft-engine's memtable enforces "no
+                // holes" and would FATAL otherwise. Stubs preserve
+                // index + term but carry no Data, so the byte
+                // savings still scale ~ (N-K)/N per follower for
+                // any non-trivial value size.
+                let mut skipped_count: usize = 0;
+                let mut skipped_idxs: Vec<u64> = Vec::new();
                 if !bypass_filter {
-                    let _ = crate::store::metronome::filter_entries(
-                        &mut entries,
-                        self.metronome_scheme.as_deref(),
-                        self.peer_id,
-                        false, // is_leader handled above
-                    );
+                    if let Some(scheme) = self.metronome_scheme.as_deref() {
+                        for e in entries.iter_mut() {
+                            let ty = e.get_entry_type();
+                            let is_conf = ty == raft::eraftpb::EntryType::EntryConfChange
+                                || ty == raft::eraftpb::EntryType::EntryConfChangeV2;
+                            if is_conf {
+                                continue;
+                            }
+                            if !scheme.should_persist(self.peer_id, e.get_index()) {
+                                skipped_count += 1;
+                                skipped_idxs.push(e.get_index());
+                                // Replace payload with a tiny no-op
+                                // stub at the same index + term.
+                                // EntryNormal with empty Data is a
+                                // legal raft entry that applies as
+                                // a no-op.
+                                e.set_entry_type(raft::eraftpb::EntryType::EntryNormal);
+                                e.clear_data();
+                                e.clear_context();
+                                e.clear_sync_log();
+                            }
+                        }
+                    }
                 }
 
-                let post_len = entries.len();
-                let skipped_count = pre_len - post_len;
                 if skipped_count > 0 {
                     crate::store::metronome::METRONOME_ENTRIES_SKIPPED
                         .inc_by(skipped_count as u64);
                 }
 
-                // Feed the WS state machine: commit + skipped idx set.
-                // Read hs_commit up front to avoid overlapping borrows
-                // of self below.
                 let hs_commit = ready
                     .hs()
                     .map(|hs| hs.get_commit())
                     .unwrap_or_else(|| self.raft_state().get_hard_state().get_commit());
                 if let Some(ws) = self.metronome_ws.as_mut() {
-                    let kept: std::collections::HashSet<u64> =
-                        entries.iter().map(|e| e.get_index()).collect();
-                    let skipped_idxs: Vec<u64> = pre_indices
-                        .into_iter()
-                        .filter(|i| !kept.contains(i))
-                        .collect();
                     ws.record(hs_commit, skipped_idxs, now);
                     if ws.maybe_trigger(now) {
                         crate::store::metronome::METRONOME_WORK_STEALS_TRIGGERED.inc();
