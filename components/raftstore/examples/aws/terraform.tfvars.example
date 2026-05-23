@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and fill in.
+
+# Required: an existing EC2 key pair name in your chosen region.
+# Create one with:
+#   aws ec2 create-key-pair --key-name tikv-bench --query 'KeyMaterial' --output text > ~/.ssh/tikv-bench.pem
+#   chmod 400 ~/.ssh/tikv-bench.pem
+key_name = "tikv-bench"
+
+# Strongly recommend restricting SSH ingress to your own IP.
+# Get yours with: curl -s https://api.ipify.org
+ssh_cidr = "0.0.0.0/0"
+
+# Defaults are tuned for the disk-bandwidth-bound matrix (N up to 7, val up to 4096).
+# region                 = "us-east-1"
+# instance_type          = "c6i.8xlarge"
+# num_data_volumes       = 7
+# data_volume_size_gb    = 100
+# data_volume_throughput = 125   # MiB/s
+# data_volume_iops       = 3000

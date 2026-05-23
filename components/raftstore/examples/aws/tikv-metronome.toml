@@ -1,0 +1,10 @@
+# Metronome-enabled TiKV config for the AWS disk-bandwidth-bound matrix bench.
+# K = f+1 (default, derived at scheme construction from PD's voter set);
+# leader still persists everything, followers persist only entries the scheme
+# assigns to them.
+
+[raftstore]
+metronome = true
+# metronome_quorum_size = 0   # 0 means "auto = f+1"
+# metronome_work_steal_timeout = "1s"
+# metronome_work_steal_duration = "1m"

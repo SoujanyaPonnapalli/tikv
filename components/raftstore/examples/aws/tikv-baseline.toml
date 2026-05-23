@@ -1,0 +1,5 @@
+# Baseline TiKV config for the AWS disk-bandwidth-bound matrix bench.
+# Vanilla raft persistence: every follower fsyncs every entry.
+
+[raftstore]
+metronome = false
