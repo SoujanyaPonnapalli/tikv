@@ -8,3 +8,10 @@ metronome = true
 # metronome_quorum_size = 0   # 0 means "auto = f+1"
 # metronome_work_steal_timeout = "1s"
 # metronome_work_steal_duration = "1m"
+
+# Keep everything in one raft group for the duration of the bench. Without
+# this, new regions spawned by splits don't inherit the metronome scheme and
+# the filter looks like it isn't engaging.
+[coprocessor]
+region-max-size = "1024GiB"
+region-split-size = "1024GiB"
