@@ -23,10 +23,10 @@ fi
 export PATH="$HOME/.tiup/bin:$PATH"
 tiup install "pd:${TIDB_VER}"
 
-# go-ycsb.
+# go-ycsb. Main package lives at cmd/go-ycsb, not the repo root.
 export PATH="$HOME/go/bin:$PATH"
 if [ ! -x "$HOME/go/bin/go-ycsb" ]; then
-    go install github.com/pingcap/go-ycsb@latest
+    go install github.com/pingcap/go-ycsb/cmd/go-ycsb@latest
 fi
 
 # Make PATH additions persistent for future shells.
