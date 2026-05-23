@@ -24,7 +24,8 @@ TIDB_VER="${TIDB_VER:-v8.5.6}"
 TIKV="$HOME_DIR/tikv/target/release/tikv-server"
 PD="$HOME_DIR/.tiup/components/pd/${TIDB_VER}/pd-server"
 YCSB="$HOME_DIR/go/bin/go-ycsb"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so bench.sh works when invoked via the ~/bench.sh symlink.
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 BASE_TOML="$SCRIPT_DIR/tikv-baseline.toml"
 METR_TOML="$SCRIPT_DIR/tikv-metronome.toml"
 
