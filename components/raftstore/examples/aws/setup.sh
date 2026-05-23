@@ -23,10 +23,15 @@ fi
 export PATH="$HOME/.tiup/bin:$PATH"
 tiup install "pd:${TIDB_VER}"
 
-# go-ycsb. Main package lives at cmd/go-ycsb, not the repo root.
+# go-ycsb. `go install module@version` fails because go-ycsb's go.mod uses
+# `replace` directives; clone + build locally instead.
 export PATH="$HOME/go/bin:$PATH"
 if [ ! -x "$HOME/go/bin/go-ycsb" ]; then
-    go install github.com/pingcap/go-ycsb/cmd/go-ycsb@latest
+    if [ ! -d "$HOME/go-ycsb-src" ]; then
+        git clone https://github.com/pingcap/go-ycsb.git "$HOME/go-ycsb-src"
+    fi
+    (cd "$HOME/go-ycsb-src" && git fetch --all && mkdir -p "$HOME/go/bin" \
+        && go build -o "$HOME/go/bin/go-ycsb" ./cmd/go-ycsb)
 fi
 
 # Make PATH additions persistent for future shells.
