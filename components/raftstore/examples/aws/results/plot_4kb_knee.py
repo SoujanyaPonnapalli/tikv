@@ -27,6 +27,13 @@ SOURCES = [
     "knee-N57-4kb-fill.csv",         # N=5,7 t=16..256 and t=8192..65536
 ]
 
+# Drop (n, threads) pairs that are session-boundary artifacts (different
+# bench session than their neighbors, producing visually anomalous spikes).
+# N=3 t=512 was the last cell of the original multival session; t=1024 was
+# the first cell of the extend session — fresh cluster state inflates t=512
+# vs both its neighbors (256→512→1024 baseline goes 18k→25k→16k).
+SKIP = {(3, 512)}
+
 # data[(n, mode)] = list of (threads, ops, p50_us, p99_us)
 data = defaultdict(list)
 for fname in SOURCES:
@@ -46,6 +53,8 @@ for fname in SOURCES:
             if val != 4096 or phase != "RUN":
                 continue
             threads = int(row["threads"])
+            if (n, threads) in SKIP:
+                continue
             ops = float(row["ops"])
             p50 = float(row["p50_us"])
             p99 = float(row["p99_us"])
