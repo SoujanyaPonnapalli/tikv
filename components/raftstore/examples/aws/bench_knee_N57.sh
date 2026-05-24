@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Knee sweep for N ∈ {5, 7} at the two vals (1 MB, 64 KB) where N=3 showed
-# clean ~1.5x wins. Theoretical ceilings:
+# clean ~1.5x wins. Thread ranges are tight, centered on the N=3 knee:
+#   - val=1MB:  N=3 knee at t=4   → sweep [1, 2, 4, 8, 16]
+#   - val=64KB: N=3 knee at t=64  → sweep [16, 32, 64, 128, 256]
+#
+# Theoretical wins:
 #   N=5, K=3 → 5/3 ≈ 1.67x
 #   N=7, K=4 → 7/4 = 1.75x
 #
-# Wraps bench_knee.sh once per (N, val). Per-set CSV stashed; all rows
-# concatenated into combined-results.csv for plotting.
+# Methodology: identify metronome's saturation thread count, report the
+# ratio at that load (no peak cherry-picking across the curve).
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -28,12 +32,12 @@ run_set() {
 }
 
 # N=5 — 5 TiKV nodes on disks 1..5, idle disks 6,7.
-run_set 5 1048576 "1 2 4 8 16 32 64 128"   2000 200
-run_set 5 65536   "2 4 8 16 32 64 128"     5000 500
+run_set 5 1048576 "1 2 4 8 16"             2000  200
+run_set 5 65536   "16 32 64 128 256"       5000  500
 
 # N=7 — 7 TiKV nodes, one per gp3 volume.
-run_set 7 1048576 "1 2 4 8 16 32 64 128"   2000 200
-run_set 7 65536   "2 4 8 16 32 64 128"     5000 500
+run_set 7 1048576 "1 2 4 8 16"             2000  200
+run_set 7 65536   "16 32 64 128 256"       5000  500
 
 echo
 echo "===== combined N=5,7 knee results ====="
