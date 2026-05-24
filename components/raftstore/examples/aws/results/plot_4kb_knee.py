@@ -24,6 +24,7 @@ SOURCES = [
     "knee-N3-extend2.csv",           # N=3 t=8192..16384
     "knee-N3-extend3.csv",           # N=3 t=32768..65536
     "knee-N57-ebs125.csv",           # N=5,7 t=512..4096
+    "knee-N57-4kb-fill.csv",         # N=5,7 t=16..256 and t=8192..65536
 ]
 
 # data[(n, mode)] = list of (threads, ops, p50_us, p99_us)
