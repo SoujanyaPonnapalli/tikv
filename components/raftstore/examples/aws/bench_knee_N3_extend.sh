@@ -30,13 +30,13 @@ run_set() {
   cp "$INNER_CSV" "$OUT_DIR/knee-N3-v${val}-extend.csv"
 }
 
-# val=4 KB: previous run at threads=[16..512] showed baseline still climbing.
-# Push to 2048. RUN_OPS big enough that even a 30k ops/s saturated cell runs ~7s.
-run_set 4096    "256 512 1024 2048"          200000 5000
+# val=4 KB: previous run at threads=[16..512] showed baseline still climbing
+# (24,937 ops/s at t=512). Skip threads we already have; push much higher.
+run_set 4096    "1024 2048 4096"             200000 5000
 
-# val=16 KB: previous run at threads=[8..256] showed baseline still climbing.
-# Push to 1024.
-run_set 16384   "128 256 512 1024"           80000  2000
+# val=16 KB: previous run at threads=[8..256] showed baseline still climbing
+# (5,810 ops/s at t=256). Skip threads we already have; push higher.
+run_set 16384   "512 1024 2048"              80000  2000
 
 echo
 echo "===== extended N=3 knee results ====="
