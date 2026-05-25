@@ -126,6 +126,63 @@ def scrape_lag(status_port: int) -> Optional[Tuple[float, float]]:
     return float(m_s.group(1)), float(m_c.group(1))
 
 
+_TS_RE = re.compile(r"\[(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d{3})")
+
+
+def parse_tikv_ts(line: str) -> Optional[float]:
+    """Parse the leading timestamp of a TiKV log line, return epoch seconds.
+
+    Format: [YYYY/MM/DD HH:MM:SS.mmm +TZ:00] [LEVEL] ..."""
+    m = _TS_RE.search(line)
+    if not m:
+        return None
+    import datetime as dt
+    try:
+        t = dt.datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S.%f")
+    except Exception:
+        return None
+    return t.timestamp()
+
+
+def parse_snapshot_events(log_path: pathlib.Path) -> dict:
+    """Grep the restart log for snapshot-apply timestamps.
+
+    Returns dict with:
+      n_snapshots          number of "begin to apply snapshot" events
+      first_apply_start    first apply-start ts (or None)
+      last_apply_end       last apply-end ts (or None)
+      total_apply_s        sum of (end - start) durations
+    Heuristic: pair begins and ends in order. If the file is missing an "end"
+    line we treat the last-seen begin as the apply-start for total_apply_s.
+    """
+    if not log_path.exists():
+        return {"n_snapshots": 0, "first_apply_start": None,
+                "last_apply_end": None, "total_apply_s": 0.0}
+    begins, ends = [], []
+    with open(log_path, errors="ignore") as f:
+        for line in f:
+            ts = parse_tikv_ts(line)
+            if ts is None:
+                continue
+            low = line.lower()
+            if "begin to apply snapshot" in low:
+                begins.append(ts)
+            elif ("apply snapshot finished" in low
+                  or ("applied snapshot" in low and "to apply" not in low)
+                  or "snapshot applied" in low):
+                ends.append(ts)
+    total = 0.0
+    for b, e in zip(begins, ends):
+        if e >= b:
+            total += (e - b)
+    return {
+        "n_snapshots": len(begins),
+        "first_apply_start": begins[0] if begins else None,
+        "last_apply_end": ends[-1] if ends else None,
+        "total_apply_s": total,
+    }
+
+
 def bytes_written(dev_basename: str) -> int:
     # /proc/diskstats field 10 = sectors_written (each sector = 512 bytes).
     with open("/proc/diskstats") as f:
@@ -329,6 +386,10 @@ def run_cell(mode: str, downtime: int, logs_root: pathlib.Path) -> Dict:
         for t, v in trajectory:
             f.write(f"{t:.3f},{v:.3f}\n")
 
+    # Parse snapshot events from the recovering follower's log.
+    restart_log = cell_dir / f"tikv{victim_dir_idx}-restart.log"
+    snap = parse_snapshot_events(restart_log)
+
     # Stop workload + cluster.
     try:
         workload.terminate()
@@ -350,13 +411,16 @@ def run_cell(mode: str, downtime: int, logs_root: pathlib.Path) -> Dict:
         "n_polls": len(trajectory),
         "disk_bytes_written": disk_bytes,
         "disk_mb_per_s": disk_mb_rate,
+        "n_snapshots": snap["n_snapshots"],
+        "snapshot_install_s": snap["total_apply_s"],
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--downtimes", default="10,30,60,120,300",
-                    help="comma-sep downtime seconds")
+    ap.add_argument("--downtimes", default="30,120,300",
+                    help="comma-sep downtime seconds (default focuses on cells "
+                         "that reliably trigger snapshot install)")
     ap.add_argument("--modes", default="baseline,metronome",
                     help="comma-sep mode set")
     ap.add_argument("--smoke", action="store_true",
@@ -378,7 +442,8 @@ def main():
         f.write("mode,downtime_s,leader_id,victim_id,victim_addr,"
                 "time_to_catchup_s,peak_interval_avg_lag,"
                 "final_interval_avg_lag,n_polls,"
-                "disk_bytes_written,disk_mb_per_s\n")
+                "disk_bytes_written,disk_mb_per_s,"
+                "n_snapshots,snapshot_install_s\n")
 
     for d in downtimes:
         for m in modes:
@@ -396,11 +461,15 @@ def main():
                         f"{r['final_interval_avg_lag']:.3f},"
                         f"{r['n_polls']},"
                         f"{r['disk_bytes_written']},"
-                        f"{r['disk_mb_per_s']:.2f}\n")
+                        f"{r['disk_mb_per_s']:.2f},"
+                        f"{r['n_snapshots']},"
+                        f"{r['snapshot_install_s']:.3f}\n")
             print(f"  → catchup={r['time_to_catchup_s']:.2f}s "
                   f"peak_lag={r['peak_interval_avg_lag']:.0f} "
                   f"disk={r['disk_bytes_written']/1e6:.1f}MB "
-                  f"({r['disk_mb_per_s']:.1f}MB/s)")
+                  f"({r['disk_mb_per_s']:.1f}MB/s) "
+                  f"snaps={r['n_snapshots']} "
+                  f"snap_install={r['snapshot_install_s']:.2f}s")
 
     print(f"\nCSV: {RESULTS_CSV}")
 
