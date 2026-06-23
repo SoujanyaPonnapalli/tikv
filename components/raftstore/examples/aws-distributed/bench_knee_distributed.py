@@ -127,7 +127,7 @@ def kill_local() -> None:
 
 def kill_remote(ip: str) -> None:
     try:
-        ssh_run(ip, "pkill -9 -f /home/ubuntu/tikv-server; rm -rf /data/disk/tikv && mkdir -p /data/disk/tikv && chown -R ubuntu:ubuntu /data/disk/tikv", timeout=30)
+        ssh_run(ip, "pkill -9 -x tikv-server; rm -rf /data/disk/tikv && mkdir -p /data/disk/tikv && chown -R ubuntu:ubuntu /data/disk/tikv", timeout=30)
     except Exception as e:
         print(f"  kill_remote({ip}) error: {e}", file=sys.stderr)
 
@@ -157,7 +157,7 @@ def start_tikv(ip: str, pd_host: str, toml_remote: str, log: str) -> None:
     fails — the wipe is now part of start.
     """
     cmd = (
-        f"pkill -9 -f /home/ubuntu/tikv-server; sleep 1; "
+        f"pkill -9 -x tikv-server; sleep 1; "
         f"rm -rf /data/disk/tikv && mkdir -p /data/disk/tikv && "
         f"{TIKV_REMOTE} --pd={pd_host}:2379 "
         f"--addr=0.0.0.0:20160 --advertise-addr={ip}:20160 "
