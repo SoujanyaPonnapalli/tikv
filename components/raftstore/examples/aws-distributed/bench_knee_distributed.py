@@ -112,14 +112,19 @@ def kill_remote(ip: str) -> None:
         print(f"  kill_remote({ip}) error: {e}", file=sys.stderr)
 
 
-def start_pd(pd_data: pathlib.Path, log: pathlib.Path) -> subprocess.Popen:
+def start_pd(pd_data: pathlib.Path, log: pathlib.Path, ctl_ip: str) -> subprocess.Popen:
+    """Start PD bound to all interfaces but advertising the controller's
+    private IP so the remote TiKV hosts can dial it. The peer-urls /
+    initial-cluster pair must match exactly or PD refuses to start.
+    """
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "ab")
     return subprocess.Popen(
         [str(PD), "--name=pd1", f"--data-dir={pd_data}",
          "--client-urls=http://0.0.0.0:2379",
-         "--peer-urls=http://0.0.0.0:2380",
-         "--initial-cluster=pd1=http://127.0.0.1:2380",
+         f"--advertise-client-urls=http://{ctl_ip}:2379",
+         f"--peer-urls=http://{ctl_ip}:2380",
+         f"--initial-cluster=pd1=http://{ctl_ip}:2380",
          f"--log-file={log.with_suffix('.pdlog')}"],
         stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -211,7 +216,9 @@ def main():
             cell_logs.mkdir(parents=True, exist_ok=True)
             pd_data = cell_logs / "pd_data"
 
-            pd_proc = start_pd(pd_data, cell_logs / "pd.out")
+            # Wipe any prior PD bootstrap from a previous failed run.
+            subprocess.run(["rm", "-rf", str(pd_data)], check=False)
+            pd_proc = start_pd(pd_data, cell_logs / "pd.out", ctl_ip)
             if not wait_pd_up(pd_host, 30):
                 print(f"  PD did not come up; aborting cell", file=sys.stderr); continue
             for ip in args.tikv_ips:
