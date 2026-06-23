@@ -45,12 +45,32 @@ BASE = pathlib.Path("/data/bench-knee-dist") if pathlib.Path("/data").exists() e
 RESULTS_CSV = BASE / "knee-results.csv"
 
 
-def ssh_run(ip: str, cmd: str, capture: bool = True, timeout: int = 60) -> str:
+def ssh_run(ip: str, cmd: str, capture: bool = True, timeout: int = 60,
+            retries: int = 3) -> str:
+    """SSH that retries on transient errors (ssh exit 255 = network blip,
+    connection refused on a still-coming-up host, etc.)."""
     args = ["ssh"] + SSH_OPTS + [f"ubuntu@{ip}", cmd]
-    if capture:
-        return subprocess.check_output(args, text=True, timeout=timeout, stderr=subprocess.STDOUT)
-    subprocess.run(args, check=True, timeout=timeout)
-    return ""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            if capture:
+                return subprocess.check_output(args, text=True, timeout=timeout, stderr=subprocess.STDOUT)
+            subprocess.run(args, check=True, timeout=timeout)
+            return ""
+        except subprocess.CalledProcessError as e:
+            last_err = e
+            # ssh exit 255 = ssh-internal error; everything else = remote command error.
+            if e.returncode != 255 or attempt == retries - 1:
+                msg = (e.output or "").strip().splitlines()[-3:]
+                print(f"  ssh_run({ip}) [exit {e.returncode}, attempt {attempt+1}]: {' | '.join(msg)}", file=sys.stderr)
+                raise
+            time.sleep(1 + attempt * 2)
+        except subprocess.TimeoutExpired as e:
+            last_err = e
+            if attempt == retries - 1:
+                raise
+            time.sleep(2)
+    raise last_err  # unreachable
 
 
 def ssh_bg(ip: str, cmd: str) -> None:
@@ -131,7 +151,14 @@ def start_pd(pd_data: pathlib.Path, log: pathlib.Path, ctl_ip: str) -> subproces
 
 
 def start_tikv(ip: str, pd_host: str, toml_remote: str, log: str) -> None:
+    """Start a tikv-server on `ip` against `pd_host`, AFTER wiping any prior
+    tikv-server process + data dir on that host. This keeps the cluster
+    bootstrap consistent even when between-cell kill_remote SSH transiently
+    fails — the wipe is now part of start.
+    """
     cmd = (
+        f"pkill -9 -f /home/ubuntu/tikv-server; sleep 1; "
+        f"rm -rf /data/disk/tikv && mkdir -p /data/disk/tikv && "
         f"{TIKV_REMOTE} --pd={pd_host}:2379 "
         f"--addr=0.0.0.0:20160 --advertise-addr={ip}:20160 "
         f"--status-addr=0.0.0.0:20180 "
