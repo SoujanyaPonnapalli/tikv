@@ -179,7 +179,9 @@ def run_ycsb(pd_host: str, threads: int, val: int, records: int, ops: int, phase
     if phase == "run":
         args += ["-p", "readproportion=0.0", "-p", "updateproportion=1.0"]
     with open(out, "wb") as f:
-        subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=2400, check=False)
+        # 2-hour per-cell timeout, so variant B (all-voter commit) cells that
+        # run at sub-1k ops/s still finish without the harness aborting.
+        subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=7200, check=False)
 
 
 _PHASE_RE = re.compile(
