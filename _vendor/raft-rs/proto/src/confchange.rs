@@ -28,7 +28,7 @@ pub fn parse_conf_change(s: &str) -> Result<Vec<ConfChangeSingle>, String> {
     let splits = s.split_ascii_whitespace();
     for tok in splits {
         if tok.len() < 2 {
-            return Err(format!("unknown token {tok}"));
+            return Err(format!("unknown token {}", tok));
         }
         let mut cc = ConfChangeSingle::default();
         let mut chars = tok.chars();
@@ -36,11 +36,11 @@ pub fn parse_conf_change(s: &str) -> Result<Vec<ConfChangeSingle>, String> {
             'v' => ConfChangeType::AddNode,
             'l' => ConfChangeType::AddLearnerNode,
             'r' => ConfChangeType::RemoveNode,
-            _ => return Err(format!("unknown token {tok}")),
+            _ => return Err(format!("unknown token {}", tok)),
         });
         cc.node_id = match chars.as_str().parse() {
             Ok(id) => id,
-            Err(e) => return Err(format!("parse token {tok} fail: {e}")),
+            Err(e) => return Err(format!("parse token {} fail: {}", tok, e)),
         };
         ccs.push(cc);
     }
@@ -71,7 +71,7 @@ pub trait ConfChangeI {
     fn into_v2(self) -> ConfChangeV2;
 
     /// Gets conf change as `ConfChangeV2`.
-    fn as_v2(&self) -> Cow<'_, ConfChangeV2>;
+    fn as_v2(&self) -> Cow<ConfChangeV2>;
 
     /// Converts conf change to `ConfChange`.
     ///
@@ -90,7 +90,7 @@ impl ConfChangeI for ConfChange {
     }
 
     #[inline]
-    fn as_v2(&self) -> Cow<'_, ConfChangeV2> {
+    fn as_v2(&self) -> Cow<ConfChangeV2> {
         Cow::Owned(self.clone().into_v2())
     }
 
@@ -107,7 +107,7 @@ impl ConfChangeI for ConfChangeV2 {
     }
 
     #[inline]
-    fn as_v2(&self) -> Cow<'_, ConfChangeV2> {
+    fn as_v2(&self) -> Cow<ConfChangeV2> {
         Cow::Borrowed(self)
     }
 

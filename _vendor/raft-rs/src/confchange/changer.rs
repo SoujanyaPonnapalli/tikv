@@ -45,7 +45,7 @@ pub struct Changer<'a> {
 
 impl Changer<'_> {
     /// Creates a changer.
-    pub fn new(tracker: &ProgressTracker) -> Changer<'_> {
+    pub fn new(tracker: &ProgressTracker) -> Changer {
         Changer { tracker }
     }
 
@@ -112,7 +112,8 @@ impl Changer<'_> {
         let (mut cfg, mut prs) = self.check_and_copy()?;
         if cfg.voters().outgoing.is_empty() {
             return Err(Error::ConfChangeError(format!(
-                "configuration is not joint: {cfg:?}"
+                "configuration is not joint: {:?}",
+                cfg
             )));
         }
         cfg.learners.extend(cfg.learners_next.drain());
@@ -270,7 +271,7 @@ impl Changer<'_> {
     ///
     /// Unlike Etcd, we don't copy progress as we don't need to mutate the `is_learner`
     /// flags. Additions and Removals should be done after everything is checked OK.
-    fn check_and_copy(&self) -> Result<(Configuration, IncrChangeMap<'_>)> {
+    fn check_and_copy(&self) -> Result<(Configuration, IncrChangeMap)> {
         let prs = IncrChangeMap {
             changes: vec![],
             base: self.tracker.progress(),
@@ -293,32 +294,37 @@ fn check_invariants(cfg: &Configuration, prs: &IncrChangeMap) -> Result<()> {
     for id in cfg.voters().ids().iter() {
         if !prs.contains(id) {
             return Err(Error::ConfChangeError(format!(
-                "no progress for voter {id}"
+                "no progress for voter {}",
+                id
             )));
         }
     }
     for id in &cfg.learners {
         if !prs.contains(*id) {
             return Err(Error::ConfChangeError(format!(
-                "no progress for learner {id}"
+                "no progress for learner {}",
+                id
             )));
         }
         // Conversely Learners and Voters doesn't intersect at all.
         if cfg.voters().outgoing.contains(id) {
             return Err(Error::ConfChangeError(format!(
-                "{id} is in learners and outgoing voters"
+                "{} is in learners and outgoing voters",
+                id
             )));
         }
         if cfg.voters().incoming.contains(id) {
             return Err(Error::ConfChangeError(format!(
-                "{id} is in learners and incoming voters"
+                "{} is in learners and incoming voters",
+                id
             )));
         }
     }
     for id in &cfg.learners_next {
         if !prs.contains(*id) {
             return Err(Error::ConfChangeError(format!(
-                "no progress for learner(next) {id}"
+                "no progress for learner(next) {}",
+                id
             )));
         }
 
@@ -326,7 +332,8 @@ fn check_invariants(cfg: &Configuration, prs: &IncrChangeMap) -> Result<()> {
         // to a conflicting voter in the outgoing config.
         if !cfg.voters().outgoing.contains(id) {
             return Err(Error::ConfChangeError(format!(
-                "{id} is in learners_next and outgoing voters"
+                "{} is in learners_next and outgoing voters",
+                id
             )));
         }
     }

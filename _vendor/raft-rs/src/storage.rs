@@ -201,7 +201,8 @@ impl MemStorageCore {
     pub fn commit_to(&mut self, index: u64) -> Result<()> {
         assert!(
             self.has_entry_at(index),
-            "commit_to {index} but the entry does not exist"
+            "commit_to {} but the entry does not exist",
+            index
         );
 
         let diff = (index - self.entries[0].index) as usize;
@@ -522,7 +523,7 @@ impl Storage for MemStorage {
 mod test {
     use std::panic::{self, AssertUnwindSafe};
 
-    use crate::protocompat::*;
+    use protobuf::Message as PbMessage;
 
     use crate::eraftpb::{ConfState, Entry, Snapshot};
     use crate::errors::{Error as RaftError, StorageError};
@@ -565,7 +566,7 @@ mod test {
 
             let t = storage.term(idx);
             if t != wterm {
-                panic!("#{i}: expect res {wterm:?}, got {t:?}");
+                panic!("#{}: expect res {:?}, got {:?}", i, wterm, t);
             }
         }
     }
@@ -629,7 +630,7 @@ mod test {
             storage.wl().entries = ents.clone();
             let e = storage.entries(lo, hi, maxsize, GetEntriesContext::empty(false));
             if e != wentries {
-                panic!("#{i}: expect entries {wentries:?}, got {e:?}");
+                panic!("#{}: expect entries {:?}, got {:?}", i, wentries, e);
             }
         }
     }
@@ -643,14 +644,14 @@ mod test {
         let wresult = Ok(5);
         let result = storage.last_index();
         if result != wresult {
-            panic!("want {wresult:?}, got {result:?}");
+            panic!("want {:?}, got {:?}", wresult, result);
         }
 
         storage.wl().append(&[new_entry(6, 5)]).unwrap();
         let wresult = Ok(6);
         let result = storage.last_index();
         if result != wresult {
-            panic!("want {wresult:?}, got {result:?}");
+            panic!("want {:?}, got {:?}", wresult, result);
         }
     }
 
@@ -676,7 +677,7 @@ mod test {
             storage.wl().compact(idx).unwrap();
             let index = storage.first_index().unwrap();
             if index != windex {
-                panic!("#{i}: want {windex}, index {index}");
+                panic!("#{}: want {}, index {}", i, windex, index);
             }
             let term = if let Ok(v) =
                 storage.entries(index, index + 1, 1, GetEntriesContext::empty(false))
@@ -686,7 +687,7 @@ mod test {
                 0
             };
             if term != wterm {
-                panic!("#{i}: want {wterm}, term {term}");
+                panic!("#{}: want {}, term {}", i, wterm, term);
             }
             let last = storage.last_index().unwrap();
             let len = storage
@@ -694,7 +695,7 @@ mod test {
                 .unwrap()
                 .len();
             if len != wlen {
-                panic!("#{i}: want {wlen}, term {len}");
+                panic!("#{}: want {}, term {}", i, wlen, len);
             }
         }
     }
@@ -728,7 +729,7 @@ mod test {
 
             let result = storage.snapshot(windex, 0);
             if result != wresult {
-                panic!("#{i}: want {wresult:?}, got {result:?}");
+                panic!("#{}: want {:?}, got {:?}", i, wresult, result);
             }
         }
     }
@@ -788,7 +789,7 @@ mod test {
                 let _ = res.unwrap();
                 let e = &storage.wl().entries;
                 if *e != wentries {
-                    panic!("#{i}: want {wentries:?}, entries {e:?}");
+                    panic!("#{}: want {:?}, entries {:?}", i, wentries, e);
                 }
             } else {
                 res.unwrap_err();

@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn test_progress_become_probe() {
         let matched = 1u64;
-        let mut tests = [
+        let mut tests = vec![
             (
                 new_progress(ProgressState::Replicate, matched, 5, 0, 256),
                 2,
@@ -359,7 +359,7 @@ mod tests {
             p.matched = prev_m;
             let ok = p.maybe_update(update);
             if ok != wok {
-                panic!("#{i}: ok= {ok}, want {wok}");
+                panic!("#{}: ok= {}, want {}", i, ok, wok);
             }
             if p.matched != wm {
                 panic!("#{}: match= {}, want {}", i, p.matched, wm);

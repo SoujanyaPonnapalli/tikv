@@ -24,7 +24,7 @@ pub enum Error {
     ConfigInvalid(String),
     /// A protobuf message codec failed in some manner.
     #[error("protobuf codec error {0:?}")]
-    CodecError(#[from] crate::protocompat::PbError),
+    CodecError(#[from] protobuf::ProtobufError),
     /// The node exists, but should not.
     #[error("The node {id} already exists in the {set} set.")]
     Exists {
@@ -144,8 +144,8 @@ mod tests {
             Error::ConfigInvalid(String::from("other error"))
         );
         assert_eq!(
-            Error::from(io::Error::other("oh no!")),
-            Error::from(io::Error::other("oh yes!"))
+            Error::from(io::Error::new(io::ErrorKind::Other, "oh no!")),
+            Error::from(io::Error::new(io::ErrorKind::Other, "oh yes!"))
         );
         assert_ne!(
             Error::StepPeerNotFound,

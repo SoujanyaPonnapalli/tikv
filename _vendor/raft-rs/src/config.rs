@@ -191,7 +191,8 @@ impl Config {
 
         if min_timeout >= max_timeout {
             return Err(Error::ConfigInvalid(format!(
-                "min election tick {min_timeout} should be less than max election tick {max_timeout}"
+                "min election tick {} should be less than max election tick {}",
+                min_timeout, max_timeout
             )));
         }
 

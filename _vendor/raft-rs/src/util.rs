@@ -10,7 +10,7 @@ use slog::{OwnedKVList, Record, KV};
 
 use crate::eraftpb::{Entry, Message};
 use crate::HashSet;
-use raft_proto::protocompat::*;
+use protobuf::Message as PbMessage;
 
 use slog::{b, record_static};
 
@@ -90,9 +90,9 @@ struct FormatKeyValueList {
 impl slog::Serializer for FormatKeyValueList {
     fn emit_arguments(&mut self, key: slog::Key, val: &fmt::Arguments) -> slog::Result {
         if !self.buffer.is_empty() {
-            write!(&mut self.buffer, ", {key}: {val}").unwrap();
+            write!(&mut self.buffer, ", {}: {}", key, val).unwrap();
         } else {
-            write!(&mut self.buffer, "{key}: {val}").unwrap();
+            write!(&mut self.buffer, "{}: {}", key, val).unwrap();
         }
         Ok(())
     }

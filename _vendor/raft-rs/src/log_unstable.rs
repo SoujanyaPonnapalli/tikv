@@ -20,11 +20,6 @@ use crate::eraftpb::{Entry, Snapshot};
 use crate::util::entry_approximate_size;
 use slog::Logger;
 
-const SHRINK_KEEP_CAPACITY: usize = 64;
-const SHRINK_EMPTY_CAPACITY_THRESHOLD: usize = 256;
-const SHRINK_RATIO: usize = 2;
-const SHRINK_RESERVED_SIZE_RATIO: usize = 2;
-
 /// Unstable contains "unstable" log entries and snapshot state that has
 /// not yet been written to Storage.
 ///
@@ -98,32 +93,6 @@ impl Unstable {
         }
     }
 
-    /// Release the backing buffer of `entries` to further reduce memory usage.
-    ///
-    /// This is only suitable when the raft group is idle and unlikely to
-    /// propose new entries soon. Frequent release and reallocation of the
-    /// buffer can hurt performance.
-    pub fn release_entry_buffer(&mut self) {
-        if self.entries.is_empty() && self.entries.capacity() > 0 {
-            self.entries = vec![];
-        }
-    }
-
-    /// Try to shrink the capacity of `entries` when the entry count drops
-    /// to reduce memory usage.
-    fn maybe_shrink_entries(&mut self) {
-        let len = self.entries.len();
-        let cap = self.entries.capacity();
-        if cap <= SHRINK_EMPTY_CAPACITY_THRESHOLD {
-            return;
-        }
-
-        let target = (len * SHRINK_RESERVED_SIZE_RATIO).max(SHRINK_KEEP_CAPACITY);
-        if cap >= target * SHRINK_RATIO {
-            self.entries.shrink_to(target);
-        }
-    }
-
     /// Clears the unstable entries and moves the stable offset up to the
     /// last index, if there is any.
     pub fn stable_entries(&mut self, index: u64, term: u64) {
@@ -143,7 +112,6 @@ impl Unstable {
             self.offset = entry.get_index() + 1;
             self.entries.clear();
             self.entries_size = 0;
-            self.maybe_shrink_entries();
         } else {
             fatal!(
                 self.logger,
@@ -179,7 +147,6 @@ impl Unstable {
     pub fn restore(&mut self, snap: Snapshot) {
         self.entries.clear();
         self.entries_size = 0;
-        self.maybe_shrink_entries();
         self.offset = snap.get_metadata().index + 1;
         self.snapshot = Some(snap);
     }
@@ -199,7 +166,6 @@ impl Unstable {
             self.offset = after;
             self.entries.clear();
             self.entries_size = 0;
-            self.maybe_shrink_entries();
         } else {
             // truncate to after and copy to self.entries then append
             let off = self.offset;
@@ -208,7 +174,6 @@ impl Unstable {
                 self.entries_size -= entry_approximate_size(e);
             }
             self.entries.truncate((after - off) as usize);
-            self.maybe_shrink_entries();
         }
         self.entries.extend_from_slice(ents);
         self.entries_size += ents.iter().map(entry_approximate_size).sum::<usize>();
@@ -251,10 +216,7 @@ impl Unstable {
 #[cfg(test)]
 mod test {
     use crate::eraftpb::{Entry, Snapshot, SnapshotMetadata};
-    use crate::log_unstable::{
-        Unstable, SHRINK_EMPTY_CAPACITY_THRESHOLD, SHRINK_KEEP_CAPACITY, SHRINK_RATIO,
-        SHRINK_RESERVED_SIZE_RATIO,
-    };
+    use crate::log_unstable::Unstable;
     use crate::util::entry_approximate_size;
 
     fn new_entry(index: u64, term: u64) -> Entry {
@@ -516,41 +478,5 @@ mod test {
             let entries_size = wentries.iter().map(entry_approximate_size).sum::<usize>();
             assert_eq!(u.entries_size, entries_size);
         }
-    }
-
-    #[test]
-    fn test_maybe_shrink_entries() {
-        let mut entries = Vec::with_capacity(SHRINK_EMPTY_CAPACITY_THRESHOLD + 1);
-        entries.resize_with(SHRINK_EMPTY_CAPACITY_THRESHOLD + 1, || new_entry(5, 1));
-        let entries_size = entries.iter().map(entry_approximate_size).sum::<usize>();
-        let mut u = Unstable {
-            entries,
-            entries_size,
-            offset: 5,
-            snapshot: None,
-            logger: crate::default_logger(),
-        };
-
-        let grown_capacity = u.entries.capacity();
-        assert!(grown_capacity > SHRINK_EMPTY_CAPACITY_THRESHOLD);
-
-        let last = u.entries.last().cloned().unwrap();
-        u.stable_entries(last.index, last.term);
-        assert!(u.entries.is_empty());
-        assert_eq!(u.entries.capacity(), SHRINK_KEEP_CAPACITY);
-
-        u.entries = (0..grown_capacity)
-            .map(|i| new_entry(i as u64 + 5, 1))
-            .collect::<Vec<_>>();
-        u.entries_size = u.entries.iter().map(entry_approximate_size).sum::<usize>();
-        let shrunk_len = u.entries.len() / (SHRINK_RATIO * SHRINK_RESERVED_SIZE_RATIO);
-        u.entries.truncate(shrunk_len);
-        u.entries_size = u.entries.iter().map(entry_approximate_size).sum::<usize>();
-        u.maybe_shrink_entries();
-        assert!(
-            u.entries.capacity()
-                <= (shrunk_len * SHRINK_RESERVED_SIZE_RATIO).max(SHRINK_KEEP_CAPACITY)
-                    * SHRINK_RATIO
-        );
     }
 }

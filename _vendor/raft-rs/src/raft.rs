@@ -21,7 +21,7 @@ use crate::eraftpb::{
     ConfChange, ConfChangeV2, ConfState, Entry, EntryType, HardState, Message, MessageType,
     Snapshot,
 };
-use raft_proto::protocompat::*;
+use protobuf::Message as _;
 use raft_proto::ConfChangeI;
 use rand::Rng;
 use slog::Logger;
@@ -312,7 +312,7 @@ pub fn vote_resp_msg_type(t: MessageType) -> MessageType {
     match t {
         MessageType::MsgRequestVote => MessageType::MsgRequestVoteResponse,
         MessageType::MsgRequestPreVote => MessageType::MsgRequestPreVoteResponse,
-        _ => panic!("Not a vote message: {t:?}"),
+        _ => panic!("Not a vote message: {:?}", t),
     }
 }
 
@@ -2146,10 +2146,6 @@ impl<T: Storage> Raft<T> {
                 if !self.commit_to_current_term() {
                     // Reject read only request when this leader has not committed any log entry
                     // in its term.
-                    info!(
-                        self.logger,
-                        "leader has not yet committed in its term; dropping read index msg",
-                    );
                     return Ok(());
                 }
 
@@ -2335,11 +2331,6 @@ impl<T: Storage> Raft<T> {
                 from = m.from;
                 "state" => ?self.state,
             ),
-            MessageType::MsgReadIndex => info!(
-                self.logger,
-                "no leader at term {term}; dropping read index msg",
-                term = self.term;
-            ),
             _ => {}
         }
         Ok(())
@@ -2420,7 +2411,7 @@ impl<T: Storage> Raft<T> {
                 if self.leader_id == INVALID_ID {
                     info!(
                         self.logger,
-                        "no leader at term {term}; dropping read index msg",
+                        "no leader at term {term}; dropping index reading msg",
                         term = self.term;
                     );
                     return Ok(());
@@ -2854,7 +2845,7 @@ impl<T: Storage> Raft<T> {
     pub fn reset_randomized_election_timeout(&mut self) {
         let prev_timeout = self.randomized_election_timeout;
         let timeout =
-            rand::rng().random_range(self.min_election_timeout..self.max_election_timeout);
+            rand::thread_rng().gen_range(self.min_election_timeout..self.max_election_timeout);
         debug!(
             self.logger,
             "reset election timeout {prev_timeout} -> {timeout} at {election_elapsed}",
