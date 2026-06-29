@@ -201,8 +201,11 @@ zipf = "6.1.0"
 
 [patch.crates-io]
 # TODO: remove this when new raft-rs is published.
-raft = { git = "https://github.com/tikv/raft-rs", branch = "master" }
-raft-proto = { git = "https://github.com/tikv/raft-rs", branch = "master" }
+# Vendored locally at _vendor/raft-rs with the all-voter quorum patch
+# (see _vendor/raft-rs/src/quorum/majority.rs). When unpatched upstream,
+# revert these two lines to git = "https://github.com/tikv/raft-rs", branch = "master".
+raft = { path = "_vendor/raft-rs" }
+raft-proto = { path = "_vendor/raft-rs/proto" }
 protobuf = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 protobuf-codegen = { git = "https://github.com/pingcap/rust-protobuf", branch = "v2.8" }
 

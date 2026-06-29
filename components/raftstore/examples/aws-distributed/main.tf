@@ -18,25 +18,60 @@ terraform {
   }
 }
 
-variable "region"        { type = string; default = "us-east-1" }
-variable "key_name"      { type = string }
-variable "ssh_cidr"      { type = string }
-variable "num_tikv"      { type = number; default = 3 }
-variable "tikv_instance" { type = string; default = "c6i.4xlarge" }
-variable "ctl_instance"  { type = string; default = "c6i.4xlarge" }
-variable "data_vol_gb"   { type = number; default = 100 }
+variable "region" {
+  type    = string
+  default = "us-east-1"
+}
+variable "key_name" {
+  type = string
+}
+variable "ssh_cidr" {
+  type = string
+}
+variable "num_tikv" {
+  type    = number
+  default = 3
+}
+variable "tikv_instance" {
+  type    = string
+  default = "c6i.4xlarge"
+}
+variable "ctl_instance" {
+  type    = string
+  default = "c6i.4xlarge"
+}
+variable "data_vol_gb" {
+  type    = number
+  default = 100
+}
 
-provider "aws" { region = var.region }
+provider "aws" {
+  region = var.region
+}
 
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"]
-  filter { name = "name";               values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"] }
-  filter { name = "virtualization-type"; values = ["hvm"] }
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
 }
 
-data "aws_vpc" "default"      { default = true }
-data "aws_subnets" "default"  { filter { name = "vpc-id"; values = [data.aws_vpc.default.id] } }
+data "aws_vpc" "default" {
+  default = true
+}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+}
 
 resource "aws_placement_group" "cluster" {
   name     = "tikv-metronome-distributed"
@@ -83,9 +118,14 @@ resource "aws_instance" "controller" {
   subnet_id                   = local.subnet_id
   placement_group             = aws_placement_group.cluster.name
   associate_public_ip_address = true
-  root_block_device { volume_type = "gp3"; volume_size = 100 }
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 100
+  }
   user_data = file("${path.module}/user_data_ctl.sh")
-  tags = { Name = "tikv-metronome-dist-ctl" }
+  tags = {
+    Name = "tikv-metronome-dist-ctl"
+  }
 }
 
 # TiKV hosts: one per replica, each with its own gp3 data volume.
@@ -98,9 +138,14 @@ resource "aws_instance" "tikv" {
   subnet_id                   = local.subnet_id
   placement_group             = aws_placement_group.cluster.name
   associate_public_ip_address = true
-  root_block_device { volume_type = "gp3"; volume_size = 50 }
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 50
+  }
   user_data = file("${path.module}/user_data_tikv.sh")
-  tags = { Name = "tikv-metronome-dist-tikv-${count.index + 1}" }
+  tags = {
+    Name = "tikv-metronome-dist-tikv-${count.index + 1}"
+  }
 }
 
 resource "aws_ebs_volume" "data" {
@@ -110,7 +155,9 @@ resource "aws_ebs_volume" "data" {
   type              = "gp3"
   throughput        = 125
   iops              = 3000
-  tags              = { Name = "tikv-metronome-dist-data-${count.index + 1}" }
+  tags = {
+    Name = "tikv-metronome-dist-data-${count.index + 1}"
+  }
 }
 
 resource "aws_volume_attachment" "data" {
@@ -120,11 +167,21 @@ resource "aws_volume_attachment" "data" {
   instance_id = aws_instance.tikv[count.index].id
 }
 
-output "ctl_public_ip"   { value = aws_instance.controller.public_ip }
-output "ctl_private_ip"  { value = aws_instance.controller.private_ip }
-output "tikv_private_ips" { value = aws_instance.tikv[*].private_ip }
-output "tikv_public_ips"  { value = aws_instance.tikv[*].public_ip }
-output "ssh_ctl_command"  { value = "ssh -i <key.pem> ubuntu@${aws_instance.controller.public_ip}" }
+output "ctl_public_ip" {
+  value = aws_instance.controller.public_ip
+}
+output "ctl_private_ip" {
+  value = aws_instance.controller.private_ip
+}
+output "tikv_private_ips" {
+  value = aws_instance.tikv[*].private_ip
+}
+output "tikv_public_ips" {
+  value = aws_instance.tikv[*].public_ip
+}
+output "ssh_ctl_command" {
+  value = "ssh -i <key.pem> ubuntu@${aws_instance.controller.public_ip}"
+}
 output "cost_note" {
   value = "Approx hourly: ctl ${var.ctl_instance} ~$0.68 + ${var.num_tikv} x ${var.tikv_instance} ~$0.68 ea + ${var.num_tikv} gp3 100GB ~$0.01 ea"
 }
