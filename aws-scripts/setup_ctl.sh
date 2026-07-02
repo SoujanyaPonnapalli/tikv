@@ -45,8 +45,8 @@ if [ -n "${1:-}" ]; then
     for ip in $1; do
         echo "  scp tikv-server + tomls to $ip"
         scp $SSH_OPTS "$HOME/tikv/target/release/tikv-server" "ubuntu@$ip:/home/ubuntu/tikv-server"
-        scp $SSH_OPTS "$HOME/tikv/components/raftstore/examples/aws-distributed/tikv-baseline.toml" \
-                       "$HOME/tikv/components/raftstore/examples/aws-distributed/tikv-metronome.toml" \
+        scp $SSH_OPTS "$HOME/tikv/aws-scripts/tikv-baseline.toml" \
+                       "$HOME/tikv/aws-scripts/tikv-metronome.toml" \
                        "ubuntu@$ip:/home/ubuntu/"
         ssh $SSH_OPTS "ubuntu@$ip" 'chmod +x ~/tikv-server'
     done

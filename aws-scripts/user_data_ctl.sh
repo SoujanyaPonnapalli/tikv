@@ -16,7 +16,7 @@ sudo -u ubuntu git -C /home/ubuntu/tikv checkout metronome
 sudo -u ubuntu git -C /home/ubuntu/tikv pull --ff-only
 
 # Symlink convenience scripts.
-sudo -u ubuntu ln -sf /home/ubuntu/tikv/components/raftstore/examples/aws-distributed/setup_ctl.sh /home/ubuntu/setup_ctl.sh
-sudo -u ubuntu ln -sf /home/ubuntu/tikv/components/raftstore/examples/aws-distributed/bench_knee_distributed.py /home/ubuntu/bench_knee_distributed.py
+sudo -u ubuntu ln -sf /home/ubuntu/tikv/aws-scripts/setup_ctl.sh /home/ubuntu/setup_ctl.sh
+sudo -u ubuntu ln -sf /home/ubuntu/tikv/aws-scripts/bench_knee_distributed.py /home/ubuntu/bench_knee_distributed.py
 
 touch /var/log/user-data-done

@@ -1,9 +1,10 @@
 # Distributed TiKV knee bench (one TiKV per VM)
 
-Parallel to the colocated `aws/` bench, but each `tikv-server` runs on its
-own EC2 instance with its own gp3 EBS volume. Inter-replica RPC goes over
-real (same-AZ, cluster-placement-group) network instead of loopback. A
-single controller host runs PD + go-ycsb + the orchestrator.
+Parallel to the colocated `components/raftstore/examples/aws/` bench, but
+each `tikv-server` runs on its own EC2 instance with its own gp3 EBS volume.
+Inter-replica RPC goes over real (same-AZ, cluster-placement-group) network
+instead of loopback. A single controller host runs PD + go-ycsb + the
+orchestrator.
 
 ## Topology
 - 1 × controller (`c6i.4xlarge`): PD + go-ycsb + bench driver. Root EBS only.
@@ -21,7 +22,7 @@ single controller host runs PD + go-ycsb + the orchestrator.
 ## Workflow
 
 ```sh
-cd components/raftstore/examples/aws-distributed/
+cd aws-scripts/
 
 # 1. Provision.
 cat > terraform.tfvars <<EOF
