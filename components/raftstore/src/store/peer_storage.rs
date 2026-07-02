@@ -241,6 +241,26 @@ where
 
     entry_storage: EntryStorage<EK, ER>,
 
+    // ---- Metronome ----
+    // Active persist-set scheme for this region (None means the scheme
+    // has not been initialized yet or metronome is disabled). Built
+    // from the region's current voter list; rebuilt on ConfChange in
+    // Phase 3.
+    metronome_scheme: Option<std::sync::Arc<crate::store::metronome::Scheme>>,
+    // Cached is_leader flag updated once per Ready by the Peer layer
+    // before handle_raft_ready is called. Leaders persist everything
+    // so we skip the filter path entirely in that case.
+    metronome_is_leader: bool,
+    // Whether metronome mode is on for this cluster (copied from
+    // cfg.metronome at Peer init; doesn't change at runtime because
+    // the config field is #[online_config(skip)]).
+    metronome_enabled: bool,
+    // Per-peer work-stealing state machine (paper §4.2). Drives the
+    // stall detection + "log everything" window that unblocks commits
+    // when a persist-set straggler is slow. Constructed lazily in
+    // init_metronome when voters.len() >= 2.
+    metronome_ws: Option<crate::store::metronome::WorkSteal>,
+
     pub tag: String,
 }
 
@@ -355,7 +375,71 @@ where
             snap_tried_cnt: RefCell::new(0),
             tag,
             entry_storage,
+            // Metronome: off by default. Peer::new calls
+            // init_metronome(..) after construction to set the
+            // scheme from the region's voter list when cfg.metronome
+            // is enabled.
+            metronome_scheme: None,
+            metronome_is_leader: false,
+            metronome_enabled: false,
+            metronome_ws: None,
         })
+    }
+
+    /// Enable metronome for this peer and build the initial persist-set
+    /// scheme from the region's voter list. Called once from
+    /// `Peer::new` when `cfg.metronome` is true. See
+    /// `crate::store::metronome` for the scheme semantics. Idempotent:
+    /// safe to call with the same inputs; returns Err only if the
+    /// voter set violates K ≥ f+1 (which shouldn't be possible for a
+    /// valid region but we surface it).
+    pub fn init_metronome(
+        &mut self,
+        voters: Vec<u64>,
+        quorum_size: usize,
+    ) -> std::result::Result<(), crate::store::metronome::SchemeError> {
+        self.metronome_enabled = true;
+        if voters.len() < 2 {
+            // Single-node regions don't benefit from metronome; the
+            // rotating persist-set collapses to "always persist".
+            self.metronome_scheme = None;
+            // Keep any existing WorkSteal state so a scheme rebuild
+            // back up to N >= 2 doesn't reset the stall clock
+            // spuriously.
+            return Ok(());
+        }
+        let scheme = crate::store::metronome::Scheme::new(voters, quorum_size)?;
+        self.metronome_scheme = Some(std::sync::Arc::new(scheme));
+        Ok(())
+    }
+
+    /// Initialize (or re-initialize) the work-stealing state machine
+    /// with the configured timeout and duration. Called by Peer::new
+    /// once, right after `init_metronome`, when cfg.metronome is on.
+    pub fn init_metronome_work_steal(
+        &mut self,
+        timeout: std::time::Duration,
+        duration: std::time::Duration,
+    ) {
+        self.metronome_ws = Some(crate::store::metronome::WorkSteal::new(timeout, duration));
+    }
+
+    /// Called by the Peer layer once per Ready iteration, before
+    /// `handle_raft_ready`, to record whether we're currently the
+    /// leader. Leaders always persist every entry.
+    #[inline]
+    pub fn set_metronome_is_leader(&mut self, is_leader: bool) {
+        self.metronome_is_leader = is_leader;
+    }
+
+    /// Exposed for tests: the number of voters in the active scheme,
+    /// or 0 if the scheme isn't built.
+    #[cfg(any(test, feature = "testexport"))]
+    pub fn metronome_num_voters(&self) -> usize {
+        self.metronome_scheme
+            .as_ref()
+            .map(|s| s.num_nodes())
+            .unwrap_or(0)
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -1007,7 +1091,67 @@ where
         };
 
         if !ready.entries().is_empty() {
-            self.append(ready.take_entries(), &mut write_task);
+            let mut entries = ready.take_entries();
+            let now = std::time::Instant::now();
+            if self.metronome_enabled {
+                let ws_active = self
+                    .metronome_ws
+                    .as_ref()
+                    .map_or(false, |w| w.is_active(now));
+                let bypass_filter = self.metronome_is_leader || ws_active;
+
+                // Stub-out (don't drop) entries this node is not in
+                // the persist-set for. The on-disk log stays
+                // contiguous — raft-engine's memtable enforces "no
+                // holes" and would FATAL otherwise. Stubs preserve
+                // index + term but carry no Data, so the byte
+                // savings still scale ~ (N-K)/N per follower for
+                // any non-trivial value size.
+                let mut skipped_count: usize = 0;
+                let mut skipped_idxs: Vec<u64> = Vec::new();
+                if !bypass_filter {
+                    if let Some(scheme) = self.metronome_scheme.as_deref() {
+                        for e in entries.iter_mut() {
+                            let ty = e.get_entry_type();
+                            let is_conf = ty == raft::eraftpb::EntryType::EntryConfChange
+                                || ty == raft::eraftpb::EntryType::EntryConfChangeV2;
+                            if is_conf {
+                                continue;
+                            }
+                            if !scheme.should_persist(self.peer_id, e.get_index()) {
+                                skipped_count += 1;
+                                skipped_idxs.push(e.get_index());
+                                // Replace payload with a tiny no-op
+                                // stub at the same index + term.
+                                // EntryNormal with empty Data is a
+                                // legal raft entry that applies as
+                                // a no-op.
+                                e.set_entry_type(raft::eraftpb::EntryType::EntryNormal);
+                                e.clear_data();
+                                e.clear_context();
+                                e.clear_sync_log();
+                            }
+                        }
+                    }
+                }
+
+                if skipped_count > 0 {
+                    crate::store::metronome::METRONOME_ENTRIES_SKIPPED
+                        .inc_by(skipped_count as u64);
+                }
+
+                let hs_commit = ready
+                    .hs()
+                    .map(|hs| hs.get_commit())
+                    .unwrap_or_else(|| self.raft_state().get_hard_state().get_commit());
+                if let Some(ws) = self.metronome_ws.as_mut() {
+                    ws.record(hs_commit, skipped_idxs, now);
+                    if ws.maybe_trigger(now) {
+                        crate::store::metronome::METRONOME_WORK_STEALS_TRIGGERED.inc();
+                    }
+                }
+            }
+            self.append(entries, &mut write_task);
         }
 
         // Last index is 0 means the peer is created from raft message

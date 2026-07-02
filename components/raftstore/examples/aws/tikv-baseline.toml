@@ -1,0 +1,13 @@
+# Baseline TiKV config for the AWS disk-bandwidth-bound matrix bench.
+# Vanilla raft persistence: every follower fsyncs every entry.
+
+[raftstore]
+metronome = false
+
+# Keep everything in one raft group for the duration of the bench, so the
+# write path is a single replicated WAL (no new regions mid-run dodging
+# whatever scheme is active). Without this, val=1MB workloads cross the
+# 96 MiB default split threshold in seconds.
+[coprocessor]
+region-max-size = "1024GiB"
+region-split-size = "1024GiB"

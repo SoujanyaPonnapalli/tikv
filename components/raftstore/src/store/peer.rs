@@ -964,7 +964,7 @@ where
 
         let tag = format!("[region {}] {}", region.get_id(), peer.get_id());
 
-        let ps = PeerStorage::new(
+        let mut ps = PeerStorage::new(
             engines,
             region,
             region_scheduler,
@@ -973,6 +973,35 @@ where
             tag.clone(),
             raft_metrics,
         )?;
+
+        // Metronome recovery (Phase 2, B1 fix): when this node persisted
+        // HardState.Commit but crashed before persisting the entries
+        // under the sparse WAL (because it wasn't in the persist-set
+        // for them), the on-disk raft_state.hard_state.commit can be
+        // ahead of the raft log's last_index. raft-rs's loadState
+        // asserts commit <= last_index and will fatal! otherwise.
+        // Clamp here; the leader re-advances commit via MsgAppend after
+        // we start, and the application's ConsistentIndex on bbolt
+        // prevents any double-apply.
+        if cfg.metronome {
+            let last_index = ps.last_index();
+            let rs = ps.raft_state_mut();
+            let hs_commit = rs.get_hard_state().get_commit();
+            if hs_commit > last_index {
+                info!(
+                    "metronome: clamping HardState.commit on load";
+                    "region_id" => region.get_id(),
+                    "peer_id" => peer_id,
+                    "from_commit" => hs_commit,
+                    "to_last_index" => last_index,
+                );
+                let mut hs = rs.get_hard_state().clone();
+                hs.set_commit(last_index);
+                rs.set_hard_state(hs);
+                crate::store::metronome::METRONOME_COMMIT_CLAMPS_ON_LOAD.inc();
+            }
+        }
+
         let applied_index = ps.applied_index();
 
         let raft_cfg = raft::Config {
@@ -1101,6 +1130,37 @@ where
 
         let persisted_index = peer.raft_group.raft.raft_log.persisted;
         peer.mut_store().update_cache_persisted(persisted_index);
+
+        // Metronome: build the initial persist-set scheme from the
+        // region's voting members (learners are excluded — they do
+        // not participate in the K ≥ f+1 durability guarantee).
+        // Phase 3 rebuilds the scheme on every ConfChange apply.
+        if cfg.metronome {
+            use kvproto::metapb::PeerRole;
+            let voters: Vec<u64> = region
+                .get_peers()
+                .iter()
+                .filter(|p| p.get_role() != PeerRole::Learner)
+                .map(|p| p.get_id())
+                .collect();
+            if let Err(e) = peer
+                .mut_store()
+                .init_metronome(voters, cfg.metronome_quorum_size)
+            {
+                warn!(
+                    "metronome: failed to initialize scheme, falling back to baseline";
+                    "region_id" => region.get_id(),
+                    "peer_id" => peer_id,
+                    "error" => ?e,
+                );
+            }
+            // Arm the work-stealing state machine with config-supplied
+            // timeout / duration. Defaults are 1s / 1m (config.rs).
+            peer.mut_store().init_metronome_work_steal(
+                cfg.metronome_work_steal_timeout.0,
+                cfg.metronome_work_steal_duration.0,
+            );
+        }
 
         Ok(peer)
     }
@@ -1937,6 +1997,26 @@ where
             self.leader_missing_time.take();
         }
         let msg_type = m.get_msg_type();
+
+        // Metronome recovery (Phase 2, B2 fix): after a sparse-WAL
+        // restart, the leader's Progress.Match for us can still
+        // reflect pre-crash memory-ACKs and therefore carry a
+        // heartbeat/append Commit that's ahead of our current
+        // last_index. raft-rs's commit_to asserts tocommit <=
+        // last_index and will fatal! otherwise. Clamp so raft stays
+        // up; the leader self-corrects via rejection/decrement once
+        // our first MsgAppendResponse arrives.
+        if ctx.cfg.metronome
+            && (msg_type == MessageType::MsgHeartbeat
+                || msg_type == MessageType::MsgAppend)
+        {
+            let last_index = self.raft_group.raft.raft_log.last_index();
+            if m.get_commit() > last_index {
+                crate::store::metronome::METRONOME_INCOMING_COMMIT_CLAMPS.inc();
+                m.set_commit(last_index);
+            }
+        }
+
         if msg_type == MessageType::MsgReadIndex {
             ctx.coprocessor_host.on_step_read_index(
                 &mut m,
@@ -2953,6 +3033,12 @@ where
                 }
             }
         }
+        // Metronome: snapshot the leader state into PeerStorage so
+        // the filter in handle_raft_ready knows whether to skip
+        // followers' entries. Leaders always persist everything.
+        let is_leader = self.is_leader();
+        self.mut_store().set_metronome_is_leader(is_leader);
+
         let (res, mut task) = match self
             .mut_store()
             .handle_raft_ready(&mut ready, destroy_regions)

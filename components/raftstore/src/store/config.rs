@@ -467,6 +467,35 @@ pub struct Config {
     // the compaction score will be incorrect.
     #[doc(hidden)]
     pub compaction_filter_enabled: bool,
+
+    // ---- Metronome (log-shuffling) ----
+    //
+    // When enabled, each region's raft log is fsynced by only a
+    // rotating K ≥ f+1 subset of voters, while all voters still ACK
+    // from memory. HardState (term/vote/commit) is always persisted.
+    // Leaders always persist everything.
+    //
+    // Mutually orthogonal to other raft-log tuning; safe to leave
+    // disabled if unused.
+    #[online_config(skip)]
+    pub metronome: bool,
+    /// Size K of the per-entry persist-set. 0 selects the default
+    /// `f+1`. Valid range is `[f+1, N]`.
+    #[online_config(skip)]
+    pub metronome_quorum_size: usize,
+    /// Stall threshold before a metronome follower steals logging
+    /// work from stragglers in its persist-set. If the region's
+    /// committed index has not advanced for longer than this while
+    /// the follower is holding buffered skipped entries, the
+    /// follower fsyncs them itself and enters a "log everything"
+    /// window (see `metronome_work_steal_duration`). Defaults to 1s.
+    #[online_config(skip)]
+    pub metronome_work_steal_timeout: ReadableDuration,
+    /// How long the follower stays in "log everything" mode after a
+    /// work-steal trigger, to avoid repeated timeout overhead.
+    /// Defaults to 1 minute, matching the Metronome paper.
+    #[online_config(skip)]
+    pub metronome_work_steal_duration: ReadableDuration,
 }
 
 impl Default for Config {
@@ -612,6 +641,13 @@ impl Default for Config {
             check_then_compact_force_bottommost_level: true,
             check_then_compact_top_n: 20,
             compaction_filter_enabled: true,
+
+            // Metronome (log-shuffling). Disabled by default so
+            // baseline users are unaffected.
+            metronome: false,
+            metronome_quorum_size: 0, // 0 => f+1 at scheme construction
+            metronome_work_steal_timeout: ReadableDuration::secs(1),
+            metronome_work_steal_duration: ReadableDuration::minutes(1),
         }
     }
 }
@@ -1044,6 +1080,31 @@ impl Config {
         if self.min_pending_apply_region_count == 0 {
             return Err(box_err!(
                 "min_pending_apply_region_count must be greater than 0"
+            ));
+        }
+
+        // Metronome. quorum_size == 0 means "use default (f+1)" and
+        // is always valid; any other value must be at least 1 (the
+        // f+1 vs N check is enforced per-region at scheme
+        // construction, because the voter count can differ across
+        // regions and changes at runtime).
+        if self.metronome && self.metronome_quorum_size == 1 {
+            // Allowed only when the cluster actually has N=1, which
+            // we can't know here. But 1 is pointless (collapses to
+            // "always persist") so we warn rather than error.
+            warn!(
+                "metronome_quorum_size=1 collapses metronome to baseline; \
+                 consider setting 0 for default f+1"
+            );
+        }
+        if self.metronome_work_steal_timeout.as_millis() == 0 {
+            return Err(box_err!(
+                "metronome_work_steal_timeout must be greater than 0"
+            ));
+        }
+        if self.metronome_work_steal_duration.as_millis() == 0 {
+            return Err(box_err!(
+                "metronome_work_steal_duration must be greater than 0"
             ));
         }
 

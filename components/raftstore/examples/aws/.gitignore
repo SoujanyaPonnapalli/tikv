@@ -1,0 +1,8 @@
+# Terraform local state and provider binaries — never commit.
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
+terraform.tfvars
+*.tfplan
+tfplan.out

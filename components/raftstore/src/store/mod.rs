@@ -6,6 +6,7 @@ pub mod entry_storage;
 pub mod fsm;
 pub mod local_metrics;
 pub mod memory;
+pub mod metronome;
 pub mod metrics;
 pub mod msg;
 mod peer;
